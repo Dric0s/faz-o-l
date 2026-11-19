@@ -22,7 +22,7 @@ services:
 
   # Servidor de mídia WebRTC (SFU). Recebe as telas e distribui pros espectadores.
   livekit:
-    image: livekit/livekit-server:${LIVEKIT_VERSION:-latest}
+    image: livekit/livekit-server:${LIVEKIT_VERSION:-v1.13.11}
     restart: unless-stopped
     ports:
       - "7881:7881/tcp" # fallback WebRTC via TCP

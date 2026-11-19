@@ -111,7 +111,7 @@ docker compose down              # desliga tudo
 | `DISCORD_BOT_TOKEN` | — | Ativa o bot (`/live`, avisos, status) |
 | `DISCORD_NOTIFY_CHANNEL_ID` | — | Canal dos avisos "fulano está ao vivo" |
 | `LIVEKIT_NODE_IP` | auto | IP público da VPS |
-| `LIVEKIT_VERSION` | `latest` | Tag da imagem `livekit/livekit-server` |
+| `LIVEKIT_VERSION` | `v1.13.11` | Tag da imagem `livekit/livekit-server` |
 
 Depois de editar o `.env`: `docker compose up -d`.
 
