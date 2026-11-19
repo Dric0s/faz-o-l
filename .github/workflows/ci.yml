@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Instalar dependências
+        working-directory: app
+        run: npm install
+      - name: Checar sintaxe
+        working-directory: app
+        run: npm run check
+      - name: Validar docker-compose
+        run: cp .env.example .env && docker compose config -q
+      - name: Build da imagem
+        run: docker build -t faz-o-l ./app

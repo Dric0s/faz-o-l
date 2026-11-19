@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Faz o L</title>
+  <meta name="description" content="Transmita sua tela para a galera do Discord com quase zero de delay." />
+  <meta name="theme-color" content="#111214" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%23ed4245'/><path d='M22 14h8v28h14v8H22z' fill='white'/></svg>" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- Tela de login -->
+  <section id="view-login" class="view center" hidden>
+    <div class="card hero">
+      <div class="logo big"><span>L</span></div>
+      <h1>Faz o L</h1>
+      <p class="muted">Transmita sua tela pra galera com quase zero de delay.</p>
+      <p id="login-error" class="error" hidden></p>
+
+      <a id="btn-discord" class="btn btn-discord" href="/auth/login" hidden>
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.6 1.3a18.3 18.3 0 0 0-5.5 0L8.6 3a19.7 19.7 0 0 0-4.9 1.5C.6 9.1-.3 13.6.1 18.1a19.9 19.9 0 0 0 6 3l1.3-2a12.9 12.9 0 0 1-2-1l.5-.4a14.2 14.2 0 0 0 12.2 0l.5.4-2 1 1.3 2a19.8 19.8 0 0 0 6-3c.5-5.2-.9-9.7-3.6-13.7ZM8 15.4c-1.2 0-2.2-1.1-2.2-2.4S6.8 10.6 8 10.6s2.2 1.1 2.2 2.4-1 2.4-2.2 2.4Zm8 0c-1.2 0-2.2-1.1-2.2-2.4s1-2.4 2.2-2.4 2.2 1.1 2.2 2.4-1 2.4-2.2 2.4Z"/></svg>
+        Entrar com Discord
+      </a>
+
+      <form id="form-guest" class="stack" hidden>
+        <input id="guest-name" maxlength="32" placeholder="Seu apelido" autocomplete="nickname" required />
+        <button class="btn btn-primary" type="submit">Continuar</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- Tela antes de entrar na sala (o clique libera o som) -->
+  <section id="view-join" class="view center" hidden>
+    <div class="card hero">
+      <div class="logo big"><span>L</span></div>
+      <h1>Faz o L</h1>
+      <div class="me-chip"><img id="join-avatar" alt="" hidden /><span id="join-name"></span></div>
+      <div id="join-status" class="join-status muted">Carregando…</div>
+      <button id="btn-join" class="btn btn-primary btn-lg">Entrar na sala</button>
+      <button id="btn-logout-join" class="btn btn-ghost btn-sm">Sair da conta</button>
+    </div>
+  </section>
+
+  <!-- Sala -->
+  <section id="view-room" class="view room" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="logo"><span>L</span></div><strong>Faz o L</strong></div>
+      <div class="stats">
+        <span class="pill" id="pill-live"><i class="dot"></i><span id="live-count">0/2 ao vivo</span></span>
+        <span class="pill" id="pill-viewers">👀 <span id="viewer-count">0/15</span></span>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-sidebar" class="btn btn-ghost btn-sm" title="Pessoas na sala">👥</button>
+        <button id="btn-leave" class="btn btn-ghost btn-sm">Sair</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <div id="stage" class="stage count-0">
+        <div id="empty" class="empty">
+          <div class="empty-icon">📺</div>
+          <h2>Ninguém transmitindo ainda</h2>
+          <p class="muted">Clique em <b>Transmitir minha tela</b> e chame a galera.</p>
+        </div>
+      </div>
+
+      <aside id="sidebar" class="sidebar">
+        <div class="panel">
+          <h3>Transmitir</h3>
+          <label class="field">Qualidade
+            <select id="opt-quality">
+              <option value="1080p60">1080p • 60 fps</option>
+              <option value="1080p30" selected>1080p • 30 fps (recomendado)</option>
+              <option value="720p60">720p • 60 fps</option>
+              <option value="720p30">720p • 30 fps (internet fraca)</option>
+            </select>
+          </label>
+          <label class="field">Conteúdo
+            <select id="opt-content">
+              <option value="motion">Jogo / vídeo (prioriza fluidez)</option>
+              <option value="detail">Texto / código (prioriza nitidez)</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="opt-audio" checked /> Transmitir som</label>
+          <p class="hint">No Windows, marque <b>“Compartilhar áudio do sistema”</b> ao escolher a tela. Em aba do Chrome, marque <b>“Compartilhar áudio da guia”</b>.</p>
+          <button id="btn-stream" class="btn btn-live btn-block">Transmitir minha tela</button>
+          <p id="slots" class="hint center-text"></p>
+        </div>
+
+        <div class="panel">
+          <h3>Na sala <span id="people-count" class="muted"></span></h3>
+          <ul id="people" class="people"></ul>
+        </div>
+      </aside>
+    </main>
+  </section>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="audio-sink" hidden></div>
+
+  <template id="tpl-tile">
+    <div class="tile">
+      <video playsinline autoplay muted></video>
+      <div class="tile-loading">Conectando…</div>
+      <div class="tile-top">
+        <span class="badge-live">AO VIVO</span>
+        <span class="tile-name"></span>
+        <span class="tile-res muted"></span>
+      </div>
+      <div class="tile-controls">
+        <button class="ctl ctl-mute" title="Mutar/desmutar">🔊</button>
+        <input class="ctl-volume" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+        <select class="ctl-quality" title="Qualidade">
+          <option value="high">Original</option>
+          <option value="low">Economia</option>
+        </select>
+        <span class="spacer"></span>
+        <button class="ctl ctl-stop" title="Parar transmissão" hidden>■ Parar</button>
+        <button class="ctl ctl-focus" title="Destacar">⤢</button>
+        <button class="ctl ctl-full" title="Tela cheia">⛶</button>
+      </div>
+    </div>
+  </template>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

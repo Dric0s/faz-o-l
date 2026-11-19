@@ -1,0 +1,12 @@
+{$DOMAIN} {
+	# Sinalização WebRTC do LiveKit (websocket)
+	handle /rtc* {
+		reverse_proxy livekit:7880
+	}
+
+	# Site, API e login do Discord
+	handle {
+		encode zstd gzip
+		reverse_proxy app:3000
+	}
+}
