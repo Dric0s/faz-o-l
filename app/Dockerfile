@@ -12,5 +12,6 @@ COPY public ./public
 
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
+# start-interval: checa a cada 2s logo após iniciar, pro Traefik liberar o tráfego rápido
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
 CMD ["node", "src/index.js"]
