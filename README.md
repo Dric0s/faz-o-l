@@ -63,7 +63,7 @@ Sem nada disso o site funciona igual: qualquer pessoa com o link entra digitando
 Aponte o domínio (registro **A**) para o IP da VPS e rode:
 
 ```bash
-git clone https://github.com/SEU_USUARIO/faz-o-l.git && cd faz-o-l && ./install.sh
+git clone https://github.com/Dric0s/faz-o-l.git && cd faz-o-l && ./install.sh
 ```
 
 O instalador instala o Docker se precisar, pergunta domínio e dados do Discord, gera as senhas e sobe tudo. No final ele mostra o link pra convidar o bot.
