@@ -18,7 +18,7 @@ Transmissão de tela **com áudio**, em **1080p/720p** e com **quase zero de del
 ```
  Streamer (navegador)                               Espectadores (navegador)
    tela + áudio ──WebRTC──▶ ┌───────────── VPS ─────────────┐ ──WebRTC──▶ até 15 pessoas
-                            │ Caddy (HTTPS)                 │
+                            │ Caddy ou Traefik (HTTPS)      │
                             │  ├─ app (Node): site, login,  │
                             │  │   vagas, bot do Discord    │◀──▶ Discord (bot /live + avisos)
                             │  └─ LiveKit (SFU WebRTC)      │
@@ -68,9 +68,21 @@ git clone https://github.com/Dric0s/faz-o-l.git && cd faz-o-l && ./install.sh
 
 O instalador instala o Docker se precisar, pergunta domínio e dados do Discord, gera as senhas e sobe tudo. No final ele mostra o link pra convidar o bot.
 
+**Já usa Coolify (ou Traefik) na VPS?** Pode instalar igual. O `install.sh` percebe que as portas 80/443 já são do Traefik e usa o proxy dele pro HTTPS, sem mexer nos seus outros apps. O Faz o L continua fora do painel do Coolify, gerenciado pelo `docker compose`.
+
+<details>
+<summary>Como funciona por baixo / Traefik que não é do Coolify</summary>
+
+O `docker-compose.yml` tem só o LiveKit e o app. O HTTPS vem de um arquivo extra, que o instalador grava em `COMPOSE_FILE` no `.env`:
+
+- `docker-compose.caddy.yml`: VPS limpa, Caddy próprio nas portas 80/443.
+- `docker-compose.traefik.yml`: Traefik existente (via labels). Os padrões são os do Coolify v4. Pra outro Traefik, defina no `.env` `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT_HTTP`, `TRAEFIK_ENTRYPOINT_HTTPS` e `TRAEFIK_CERTRESOLVER`, e use `COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.yml`.
+
+</details>
+
 ### 3. Libere as portas
 
-No painel/firewall da VPS (o `ufw` o script já configura):
+No firewall do painel da VPS (Hostinger, Contabo, Oracle etc.). O `ufw` o script já configura:
 
 | Porta | Pra quê |
 |---|---|
@@ -133,14 +145,14 @@ Abra http://localhost:3000. O `localhost` conta como contexto seguro, então a c
 ## Problemas comuns
 
 - **Fica em "Conectando…" / sem vídeo:** a porta **7882/udp** (ou 7881/tcp) está bloqueada no firewall do provedor da VPS.
-- **Certificado HTTPS não sai:** o DNS ainda não aponta pra VPS, ou a porta 80 está fechada. Veja com `docker compose logs caddy`.
+- **Certificado HTTPS não sai:** o DNS ainda não aponta pra VPS, ou a porta 80 está fechada. Veja com `docker compose logs caddy` (ou, com Coolify, `docker logs coolify-proxy`).
 - **Live sem som:** a caixa de compartilhar áudio não foi marcada na janela do navegador, ou você está no macOS compartilhando uma janela (só abas têm áudio lá).
 - **Travando para quem assiste:** escolha **Economia** na live, ou transmita em 720p/30fps.
 - **"Você precisa ser membro do servidor":** o `DISCORD_GUILD_ID` está errado, ou a pessoa não está no servidor.
 
 ## Stack
 
-[LiveKit](https://github.com/livekit/livekit) (SFU WebRTC) · Node.js + Express · [discord.js](https://discord.js.org) · Caddy · HTML/CSS/JS sem build.
+[LiveKit](https://github.com/livekit/livekit) (SFU WebRTC) · Node.js + Express · [discord.js](https://discord.js.org) · Caddy ou Traefik · HTML/CSS/JS sem build.
 
 ## Licença
 

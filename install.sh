@@ -38,12 +38,42 @@ ensure_docker() {
   $SUDO docker compose version >/dev/null 2>&1 || fail "O plugin 'docker compose' não está disponível."
 }
 
+# Decide quem cuida do HTTPS: o Caddy do projeto ou um Traefik já existente (Coolify)
+detect_proxy() {
+  if $SUDO docker network inspect "${TRAEFIK_NETWORK:-coolify}" >/dev/null 2>&1; then
+    echo traefik
+  elif $SUDO ss -ltnH 'sport = :80' 2>/dev/null | grep -q . \
+    && ! $SUDO docker ps --format '{{.Names}}' | grep -q 'caddy'; then
+    echo busy
+  else
+    echo caddy
+  fi
+}
+
+compose_file_for() {
+  case "$1" in
+    traefik) echo "docker-compose.yml:docker-compose.traefik.yml" ;;
+    *) echo "docker-compose.yml:docker-compose.caddy.yml" ;;
+  esac
+}
+
+# Instalações antigas não têm COMPOSE_FILE no .env
+ensure_compose_file() {
+  grep -q '^COMPOSE_FILE=' .env && return 0
+  local mode; mode="$(detect_proxy)"
+  [ "$mode" = busy ] && mode=caddy
+  info "Configurando modo de HTTPS: $mode"
+  printf '\n# Quem cuida do HTTPS (gerado pelo install.sh)\nCOMPOSE_FILE=%s\n' "$(compose_file_for "$mode")" >> .env
+}
+
 if [ "${1:-}" = "update" ]; then
   ensure_docker
+  [ -f .env ] || fail "Nada instalado ainda. Rode ./install.sh primeiro."
   info "Atualizando código…"
   git pull --ff-only
-  compose pull caddy livekit
-  compose up -d --build
+  ensure_compose_file
+  compose pull --ignore-buildable || true
+  compose up -d --build --remove-orphans
   bold "Atualizado! ✅"
   exit 0
 fi
@@ -64,11 +94,19 @@ if [ -f .env ]; then
   ask RECONF ".env já existe. Reconfigurar do zero? (s/N)" "N"
   if [[ ! "$RECONF" =~ ^[sSyY] ]]; then
     info "Mantendo .env atual. Subindo os containers…"
-    compose up -d --build
+    ensure_compose_file
+    compose up -d --build --remove-orphans
     bold "Pronto! Acesse: https://$(grep -E '^DOMAIN=' .env | cut -d= -f2)"
     exit 0
   fi
 fi
+
+PROXY_MODE="$(detect_proxy)"
+case "$PROXY_MODE" in
+  traefik) info "Coolify/Traefik detectado: o Faz o L vai usar o proxy dele para o HTTPS (sem conflito nas portas 80/443)." ;;
+  busy) fail "A porta 80 já está em uso por outro serviço. Libere a porta ou, se for um Traefik, defina TRAEFIK_NETWORK e veja o README." ;;
+  caddy) info "Nenhum proxy encontrado: o Faz o L vai usar o Caddy próprio nas portas 80/443." ;;
+esac
 
 PUBLIC_IP="$(curl -4fsS --max-time 5 https://api.ipify.org || true)"
 
@@ -101,6 +139,9 @@ umask 077
 cat > .env <<EOF
 DOMAIN=${DOMAIN}
 
+# Quem cuida do HTTPS (gerado pelo install.sh)
+COMPOSE_FILE=$(compose_file_for "$PROXY_MODE")
+
 LIVEKIT_API_KEY=API$(rand 12)
 LIVEKIT_API_SECRET=$(rand 48)
 LIVEKIT_NODE_IP=${PUBLIC_IP}
@@ -125,12 +166,13 @@ if command -v ufw >/dev/null 2>&1 && $SUDO ufw status | grep -q "Status: active"
 fi
 
 info "Construindo e subindo os containers (pode levar alguns minutos)…"
-compose up -d --build
+compose up -d --build --remove-orphans
 
 echo
 bold "✅ Faz o L está no ar: https://${DOMAIN}"
 echo
-echo "Portas que precisam estar abertas no painel da VPS: 80/tcp, 443/tcp, 7881/tcp, 7882/udp"
+echo "Portas que precisam estar abertas no firewall do painel da VPS:"
+echo "   80/tcp, 443/tcp, 7881/tcp e 7882/udp  (sem 7882/udp e 7881/tcp o vídeo não conecta)"
 if [ -n "$DISCORD_CLIENT_SECRET" ]; then
   echo
   echo "No Discord Developer Portal > OAuth2 > Redirects, adicione:"

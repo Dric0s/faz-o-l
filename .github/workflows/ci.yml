@@ -14,11 +14,16 @@ jobs:
           node-version: 22
       - name: Instalar dependências
         working-directory: app
-        run: npm install
+        run: npm ci
       - name: Checar sintaxe
         working-directory: app
         run: npm run check
-      - name: Validar docker-compose
-        run: cp .env.example .env && docker compose config -q
+      - name: Checar install.sh
+        run: bash -n install.sh
+      - name: Validar docker-compose (Caddy e Traefik)
+        run: |
+          cp .env.example .env
+          COMPOSE_FILE=docker-compose.yml:docker-compose.caddy.yml docker compose config -q
+          COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.yml docker compose config -q
       - name: Build da imagem
         run: docker build -t faz-o-l ./app

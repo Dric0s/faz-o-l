@@ -1,25 +1,12 @@
 # Faz o L — screen sharing com quase zero de delay
-# Suba tudo com:  ./install.sh   (ou: docker compose up -d --build)
+#
+# Este arquivo tem só o essencial (LiveKit + app). O HTTPS vem de um destes:
+#   docker-compose.caddy.yml    -> VPS limpa: Caddy com Let's Encrypt nas portas 80/443
+#   docker-compose.traefik.yml  -> VPS com Coolify/Traefik já ocupando 80/443
+# O ./install.sh escolhe sozinho e grava em COMPOSE_FILE no .env,
+# então depois é só usar "docker compose up -d --build" normalmente.
 
 services:
-  # HTTPS automático (Let's Encrypt) + proxy para o app e para o LiveKit
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    environment:
-      DOMAIN: ${DOMAIN:?Defina DOMAIN no .env}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - app
-      - livekit
-
   # Servidor de mídia WebRTC (SFU). Recebe as telas e distribui pros espectadores.
   livekit:
     image: livekit/livekit-server:${LIVEKIT_VERSION:-v1.13.11}
@@ -27,6 +14,9 @@ services:
     ports:
       - "7881:7881/tcp" # fallback WebRTC via TCP
       - "7882:7882/udp" # WebRTC (porta UDP única)
+    networks:
+      default:
+        aliases: [fazol-livekit]
     environment:
       LIVEKIT_CONFIG: |
         port: 7880
@@ -42,7 +32,7 @@ services:
         webhook:
           api_key: ${LIVEKIT_API_KEY}
           urls:
-            - http://app:3000/api/livekit/webhook
+            - http://fazol-app:3000/api/livekit/webhook
         room:
           empty_timeout: 300
 
@@ -51,10 +41,9 @@ services:
     build: ./app
     restart: unless-stopped
     env_file: .env
+    networks:
+      default:
+        aliases: [fazol-app]
     environment:
-      LIVEKIT_HOST: http://livekit:7880
-      PUBLIC_URL: https://${DOMAIN}
-
-volumes:
-  caddy_data:
-  caddy_config:
+      LIVEKIT_HOST: http://fazol-livekit:7880
+      PUBLIC_URL: https://${DOMAIN:?Defina DOMAIN no .env}

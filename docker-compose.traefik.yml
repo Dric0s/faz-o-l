@@ -1,0 +1,46 @@
+# VPS que já tem Coolify (ou outro Traefik) nas portas 80/443.
+# O Faz o L entra na rede do Traefik e pede o certificado pra ele.
+# Use junto com o docker-compose.yml (o install.sh já configura isso).
+#
+# Padrões compatíveis com o Coolify v4. Para outro Traefik, ajuste no .env:
+#   TRAEFIK_NETWORK, TRAEFIK_ENTRYPOINT_HTTP, TRAEFIK_ENTRYPOINT_HTTPS, TRAEFIK_CERTRESOLVER
+
+services:
+  app:
+    networks:
+      traefik: {}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-coolify}
+      # HTTP -> HTTPS
+      - traefik.http.middlewares.fazol-https.redirectscheme.scheme=https
+      - traefik.http.routers.fazol-http.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.fazol-http.entrypoints=${TRAEFIK_ENTRYPOINT_HTTP:-http}
+      - traefik.http.routers.fazol-http.middlewares=fazol-https
+      - traefik.http.routers.fazol-http.service=fazol-app
+      # Site
+      - traefik.http.routers.fazol-app.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.fazol-app.entrypoints=${TRAEFIK_ENTRYPOINT_HTTPS:-https}
+      - traefik.http.routers.fazol-app.tls=true
+      - traefik.http.routers.fazol-app.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.fazol-app.service=fazol-app
+      - traefik.http.services.fazol-app.loadbalancer.server.port=3000
+
+  livekit:
+    networks:
+      traefik: {}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-coolify}
+      # Sinalização WebRTC (websocket) no mesmo domínio, em /rtc
+      - traefik.http.routers.fazol-rtc.rule=Host(`${DOMAIN}`) && PathPrefix(`/rtc`)
+      - traefik.http.routers.fazol-rtc.entrypoints=${TRAEFIK_ENTRYPOINT_HTTPS:-https}
+      - traefik.http.routers.fazol-rtc.tls=true
+      - traefik.http.routers.fazol-rtc.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.routers.fazol-rtc.service=fazol-rtc
+      - traefik.http.services.fazol-rtc.loadbalancer.server.port=7880
+
+networks:
+  traefik:
+    name: ${TRAEFIK_NETWORK:-coolify}
+    external: true
