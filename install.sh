@@ -2,6 +2,7 @@
 # Faz o L — instalador para VPS Linux (Ubuntu/Debian recomendados)
 # Uso:  ./install.sh            -> instala/reconfigura e sobe tudo
 #       ./install.sh update     -> atualiza o código (git pull) e reinicia
+#       ./install.sh discord    -> configura (ou altera) bot e login do Discord
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -26,6 +27,23 @@ ask() { # ask VAR "Pergunta" "padrão"
     read -rp "$prompt: " value </dev/tty || true
   fi
   printf -v "$var" '%s' "$value"
+}
+
+ask_secret() { # ask_secret VAR "Pergunta" -> não mostra o que é digitado
+  local var="$1" prompt="$2" value
+  read -rsp "$prompt: " value </dev/tty || true
+  echo
+  printf -v "$var" '%s' "$value"
+}
+
+env_get() { grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true; }
+
+env_set() { # env_set CHAVE valor  (substitui ou acrescenta no .env)
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  awk -v k="$key" -v v="$value" 'BEGIN{done=0} $0 ~ "^"k"=" {print k"="v; done=1; next} {print} END{if(!done) print k"="v}' .env > "$tmp"
+  cat "$tmp" > .env
+  rm -f "$tmp"
 }
 
 compose() { $SUDO docker compose "$@"; }
@@ -65,6 +83,50 @@ ensure_compose_file() {
   info "Configurando modo de HTTPS: $mode"
   printf '\n# Quem cuida do HTTPS (gerado pelo install.sh)\nCOMPOSE_FILE=%s\n' "$(compose_file_for "$mode")" >> .env
 }
+
+if [ "${1:-}" = "discord" ]; then
+  [ -f .env ] || fail "Nada instalado ainda. Rode ./install.sh primeiro."
+  DOMAIN="$(env_get DOMAIN)"
+  bold "Configurar Discord para https://${DOMAIN}"
+  echo "Enter mantém o valor atual. Digite - para apagar um valor."
+  echo "Os segredos (Client Secret e token) não aparecem na tela enquanto você digita."
+  echo
+
+  for item in \
+    "DISCORD_CLIENT_ID|Application ID (Client ID)|plain" \
+    "DISCORD_CLIENT_SECRET|Client Secret (OAuth2)|secret" \
+    "DISCORD_BOT_TOKEN|Token do bot|secret" \
+    "DISCORD_GUILD_ID|ID do servidor (só membros dele entram)|plain" \
+    "DISCORD_NOTIFY_CHANNEL_ID|ID do canal de avisos 'ao vivo'|plain"; do
+    IFS='|' read -r key label kind <<<"$item"
+    current="$(env_get "$key")"
+    if [ "$kind" = secret ]; then
+      state="vazio"; [ -n "$current" ] && state="já definido"
+      ask_secret value "  $label [$state]"
+    else
+      ask value "  $label" "${current:-}"
+    fi
+    if [ "$value" = "-" ]; then env_set "$key" ""; elif [ -n "$value" ]; then env_set "$key" "$value"; fi
+  done
+
+  info "Reiniciando o app…"
+  compose up -d app
+  sleep 5
+  compose logs --tail 5 app
+
+  CLIENT_ID="$(env_get DISCORD_CLIENT_ID)"
+  echo
+  if [ -n "$(env_get DISCORD_CLIENT_SECRET)" ]; then
+    echo "No Developer Portal > OAuth2 > Redirects, confira se existe:"
+    echo "   https://${DOMAIN}/auth/callback"
+  fi
+  if [ -n "$(env_get DISCORD_BOT_TOKEN)" ] && [ -n "$CLIENT_ID" ]; then
+    echo
+    echo "Convide o bot para o seu servidor:"
+    echo "   https://discord.com/oauth2/authorize?client_id=${CLIENT_ID}&scope=bot+applications.commands&permissions=19456"
+  fi
+  exit 0
+fi
 
 if [ "${1:-}" = "update" ]; then
   ensure_docker

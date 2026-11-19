@@ -108,6 +108,7 @@ Pronto: abra `https://SEU_DOMINIO` ou use `/live` no Discord.
 docker compose logs -f app       # logs do site/bot
 docker compose logs -f livekit   # logs do servidor de vídeo
 ./install.sh update              # baixa a versão nova e reinicia
+./install.sh discord             # configura/altera bot e login do Discord depois da instalação
 docker compose down              # desliga tudo
 ```
 
