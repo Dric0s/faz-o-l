@@ -226,9 +226,20 @@ document.addEventListener('click', () => {
 });
 
 function onTrackSubscribed(track, publication, participant) {
-  // A própria transmissão feita pelo app desktop: não recebe de volta (banda e eco)
+  // A própria transmissão feita pelo app desktop: o áudio nunca volta (eco);
+  // o vídeo aparece como prévia, se a opção estiver ligada
   if (state.me && participant.identity === state.me.id + DESKTOP_SUFFIX) {
-    publication.setSubscribed(false);
+    if (track.kind !== Track.Kind.Video || !selfPreviewEnabled()) {
+      publication.setSubscribed(false);
+      return;
+    }
+    const tile = ensureTile(participant.identity, `${participant.name || 'Você'} • prévia`, true);
+    tile.publication = publication;
+    track.attach(tile.video);
+    tile.el.classList.add('has-video');
+    publication.setVideoQuality(VideoQuality.HIGH);
+    updateResolution(tile, track);
+    renderPresence();
     return;
   }
   if (track.source === Track.Source.ScreenShare && track.kind === Track.Kind.Video) {
@@ -631,6 +642,19 @@ async function stopStream() {
 
 const desktop = window.__TAURI__ || null;
 
+function selfPreviewEnabled() {
+  return store.get('self-preview', '1') === '1';
+}
+
+// Liga/desliga a prévia da própria transmissão (só vídeo, nunca o áudio)
+function applySelfPreview() {
+  const mine = state.me && state.room?.remoteParticipants.get(state.me.id + DESKTOP_SUFFIX);
+  if (!mine) return;
+  for (const pub of mine.trackPublications.values()) {
+    if (pub.kind === Track.Kind.Video) pub.setSubscribed(selfPreviewEnabled());
+  }
+}
+
 const DESKTOP_QUALITY = {
   '1440p60': { width: 2560, height: 1440, fps: 60, bitrate: 14_000_000 },
   '1080p60': { width: 1920, height: 1080, fps: 60, bitrate: 10_000_000 },
@@ -654,6 +678,11 @@ async function setupDesktop() {
   $('#opt-quality').addEventListener('change', (e) => store.set('desktop-quality', e.target.value));
   $('#opt-codec').value = store.get('desktop-codec', 'h264');
   $('#opt-codec').addEventListener('change', (e) => store.set('desktop-codec', e.target.value));
+  $('#opt-preview').checked = selfPreviewEnabled();
+  $('#opt-preview').addEventListener('change', (e) => {
+    store.set('self-preview', e.target.checked ? '1' : '0');
+    applySelfPreview();
+  });
 
   try {
     const monitors = await desktop.core.invoke('list_monitors');
