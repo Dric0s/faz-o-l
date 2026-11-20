@@ -162,9 +162,27 @@ impl GraphicsCaptureApiHandler for ScreenHandler {
 
         let timestamp_us = self.started.elapsed().as_micros() as i64;
         let mut buffer = frame.buffer()?;
-        let pitch = buffer.row_pitch();
+        let src_pitch = buffer.row_pitch() as usize;
         let raw = buffer.as_raw_buffer();
-        let bgra = &raw[(crop_x * 4) as usize..];
+        if raw.len() < src_pitch * height as usize {
+            return Ok(()); // quadro incompleto (janela mudando de tamanho)
+        }
+        // Recorte do centro: copia só a faixa 4:3 numa imagem contínua (o libyuv
+        // exige pitch * altura bytes; um slice deslocado faria o app abortar)
+        let cropped;
+        let (bgra, pitch): (&[u8], u32) = if crop_x > 0 {
+            let row = (width * 4) as usize;
+            let start = (crop_x * 4) as usize;
+            let mut out = vec![0u8; row * height as usize];
+            for (y, dst) in out.chunks_exact_mut(row).enumerate() {
+                let s = y * src_pitch + start;
+                dst.copy_from_slice(&raw[s..s + row]);
+            }
+            cropped = out;
+            (&cropped, width * 4)
+        } else {
+            (raw, src_pitch as u32)
+        };
 
         // Placa de vídeo sem redimensionar: BGRA -> NV12 direto, uma conversão só
         if let Sink::Hardware { sender, .. } = &self.flags.sink {
