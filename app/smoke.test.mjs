@@ -68,10 +68,12 @@ sql(`INSERT INTO clips (id, channel_id, file, mime, seconds, streamer_id, stream
 assert.equal((await call(owner, 'PATCH', '/api/clips/clip1', { title: 'x' })).status, 403);
 const edited = (await call(friend, 'PATCH', '/api/clips/clip1', {
   title: 'Que jogada @dono!',
-  description: 'olha isso @amigo.legal. e @estranho',
+  description: 'olha isso @Amigo. e @estranho',
   publish: true,
 })).json;
 assert.deepEqual(edited.mentions.map((u) => u.username).sort(), ['amigo.legal', 'dono']);
+// @nome de exibição vira o @ do Discord
+assert.equal(edited.description, 'olha isso @amigo.legal. e @estranho');
 assert.equal(sql('SELECT published FROM clips WHERE id = ?').get('clip1').published, 1);
 
 // Perfis

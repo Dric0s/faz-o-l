@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-21.3';
+const SITE_VERSION = '2026-11-21.4';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -1224,6 +1224,9 @@ function renderMentionBox() {
       return b;
     }),
   );
+  // dentro de um <dialog> modal a lista precisa estar no próprio dialog (top layer), senão fica atrás
+  const host = field.closest('dialog') || document.body;
+  if (box.parentElement !== host) host.append(box);
   const rect = field.getBoundingClientRect();
   box.style.left = `${rect.left}px`;
   box.style.top = `${rect.bottom + 4}px`;
@@ -1237,6 +1240,7 @@ async function onMentionInput(e) {
   const m = upto.match(/(?:^|\s)@([a-z0-9_.]{0,32})$/i);
   if (!m) return hideMentionBox();
   const query = m[1].toLowerCase();
+  if (mentionState.field !== field) state.members = null; // recarrega membros novos a cada abertura
   const members = await mentionCandidates();
   mentionState.field = field;
   mentionState.start = upto.length - m[1].length - 1;

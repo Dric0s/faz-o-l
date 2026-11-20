@@ -28,18 +28,34 @@ const MENTION_RE = /@([a-z0-9_.]{2,32})/gi;
 
 const getClip = (id) => sql('SELECT * FROM clips WHERE id = ?').get(id);
 
-/** Usuários marcados (@username) que são membros do canal do clipe. */
+const nameKey = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9_.]/gi, '').toLowerCase();
+
+/**
+ * Usuários marcados que são membros do canal do clipe. Aceita o @ do Discord
+ * (@dougrinhas) ou o nome de exibição sem espaços (@douglas), se for único no
+ * canal; nesse caso o texto é reescrito para o @ do Discord.
+ */
 function resolveMentions(channelId, ...texts) {
-  const found = new Map();
-  for (const text of texts) {
-    for (const [, raw] of String(text || '').matchAll(MENTION_RE)) {
-      const username = raw.replace(/\.+$/, '').toLowerCase();
-      if (found.has(username)) continue;
-      const user = getUserByUsername(username);
-      if (user && memberRole(channelId, user.id)) found.set(username, user);
-    }
+  const members = sql(`SELECT u.id, u.username, u.name, u.avatar FROM members m JOIN users u ON u.id = m.user_id
+                       WHERE m.channel_id = ? AND u.username IS NOT NULL`).all(channelId);
+  const byName = new Map();
+  for (const u of members) {
+    const key = nameKey(u.name);
+    if (key.length >= 2) byName.set(key, byName.has(key) ? null : u);
   }
-  return [...found.values()];
+  const found = new Map();
+  const rewritten = texts.map((text) =>
+    String(text || '').replace(MENTION_RE, (whole, raw) => {
+      const token = raw.replace(/\.+$/, '');
+      const key = token.toLowerCase();
+      let user = getUserByUsername(key);
+      if (!user || !memberRole(channelId, user.id)) user = byName.get(key) || null;
+      if (!user) return whole;
+      found.set(user.id, user);
+      return `@${user.username}${raw.slice(token.length)}`;
+    }),
+  );
+  return { users: [...found.values()], texts: rewritten };
 }
 
 const mentionsOf = (clipId) =>
@@ -95,9 +111,14 @@ function publish(clipId) {
 }
 
 function setDetails(clip, { title, description }) {
-  const cleanTitle = String(title ?? clip.title).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, TITLE_MAX);
-  const cleanDescription = String(description ?? clip.description).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim().slice(0, DESCRIPTION_MAX);
-  const mentioned = resolveMentions(clip.channel_id, cleanTitle, cleanDescription);
+  const resolved = resolveMentions(
+    clip.channel_id,
+    String(title ?? clip.title).replace(/[\u0000-\u001f\u007f]/g, ' ').trim(),
+    String(description ?? clip.description).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim(),
+  );
+  const mentioned = resolved.users;
+  const cleanTitle = resolved.texts[0].slice(0, TITLE_MAX);
+  const cleanDescription = resolved.texts[1].slice(0, DESCRIPTION_MAX);
   transaction(() => {
     sql('UPDATE clips SET title = ?, description = ? WHERE id = ?').run(cleanTitle, cleanDescription, clip.id);
     sql('DELETE FROM clip_mentions WHERE clip_id = ?').run(clip.id);
