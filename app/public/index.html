@@ -82,8 +82,20 @@
               <option value="detail">Texto / código (prioriza nitidez)</option>
             </select>
           </label>
+          <div id="desktop-opts" class="stack" hidden>
+            <label class="field">Monitor
+              <select id="opt-monitor"></select>
+            </label>
+            <label class="field">Codec
+              <select id="opt-codec">
+                <option value="h264">H.264 (todos assistem, recomendado)</option>
+                <option value="av1">AV1 (melhor qualidade, PCs mais novos)</option>
+                <option value="vp9">VP9 (boa qualidade, mais CPU)</option>
+              </select>
+            </label>
+          </div>
           <label class="check"><input type="checkbox" id="opt-audio" checked /> Transmitir som</label>
-          <p class="hint">No Windows, marque <b>“Compartilhar áudio do sistema”</b> ao escolher a tela. Em aba do Chrome, marque <b>“Compartilhar áudio da guia”</b>.</p>
+          <p class="hint" id="browser-audio-hint">No Windows, marque <b>“Compartilhar áudio do sistema”</b> ao escolher a tela. Em aba do Chrome, marque <b>“Compartilhar áudio da guia”</b>.</p>
           <button id="btn-stream" class="btn btn-live btn-block">Transmitir minha tela</button>
           <p id="slots" class="hint center-text"></p>
         </div>

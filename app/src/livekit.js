@@ -64,6 +64,38 @@ async function setPermission(identity, permission) {
   await roomService.updateParticipant(config.room, identity, undefined, permission);
 }
 
+// O app desktop transmite como um participante separado: "<id do usuário>:tela"
+const DESKTOP_SUFFIX = ':tela';
+const isDesktop = (identity) => identity.endsWith(DESKTOP_SUFFIX);
+
+// Tokens do app desktop já emitidos, mas cujo participante ainda não entrou na sala
+const pendingDesktop = new Map(); // identity -> timestamp
+
+/** Quem ocupa vaga de transmissão: publicando, com permissão, ou desktop prestes a entrar. */
+function streamerIdentities(participants) {
+  const ids = new Set(
+    participants.filter((p) => p.permission?.canPublish || hasScreenShare(p)).map((p) => p.identity),
+  );
+  const now = Date.now();
+  for (const [identity, since] of pendingDesktop) {
+    if (now - since > PENDING_TIMEOUT_MS) pendingDesktop.delete(identity);
+    else ids.add(identity);
+  }
+  return ids;
+}
+
+/** Retorna o erro 409 se as vagas de transmissão acabaram, ou null. */
+function slotsFull(participants) {
+  const ids = streamerIdentities(participants);
+  if (ids.size < config.maxStreamers) return null;
+  const names = [...ids].map((id) => participants.find((p) => p.identity === id)?.name || 'alguém').join(' e ');
+  return { status: 409, error: `Já tem ${config.maxStreamers} pessoas transmitindo (${names}). Espere uma vaga.` };
+}
+
+async function removeParticipant(identity) {
+  await roomService.removeParticipant(config.room, identity).catch(() => {});
+}
+
 /** Estado atual da sala (usado pela API e pelo bot). */
 export async function getRoomState() {
   const participants = await listParticipants();
@@ -92,7 +124,8 @@ async function sweepStuckGrants() {
     const since = pendingGrants.get(p.identity) ?? 0;
     if (now - since > PENDING_TIMEOUT_MS) {
       pendingGrants.delete(p.identity);
-      await setPermission(p.identity, VIEWER_PERMISSION).catch(() => {});
+      if (isDesktop(p.identity)) await removeParticipant(p.identity);
+      else await setPermission(p.identity, VIEWER_PERMISSION).catch(() => {});
       liveEvents.emit('room:update');
     }
   }
@@ -126,6 +159,7 @@ export function livekitRouter() {
       case 'track_published':
         if (p && isScreenTrack(event.track) && !activeStreams.has(p.identity)) {
           pendingGrants.delete(p.identity);
+          pendingDesktop.delete(p.identity);
           activeStreams.set(p.identity, p.name || p.identity);
           liveEvents.emit('stream:start', { identity: p.identity, name: p.name || p.identity });
         }
@@ -133,13 +167,15 @@ export function livekitRouter() {
       case 'track_unpublished':
         if (p && isScreenTrack(event.track)) {
           endStream(p.identity);
-          // Parou de transmitir: devolve a vaga
-          setPermission(p.identity, VIEWER_PERMISSION).catch(() => {});
+          // Parou de transmitir: devolve a vaga (o participante do app desktop sai da sala)
+          if (isDesktop(p.identity)) removeParticipant(p.identity);
+          else setPermission(p.identity, VIEWER_PERMISSION).catch(() => {});
         }
         break;
       case 'participant_left':
         if (p) {
           pendingGrants.delete(p.identity);
+          pendingDesktop.delete(p.identity);
           endStream(p.identity);
         }
         break;
@@ -200,11 +236,8 @@ export function livekitRouter() {
         if (!me) return { status: 409, error: 'Entre na sala antes de transmitir.' };
         if (me.permission?.canPublish) return { status: 200 };
 
-        const streamers = participants.filter((p) => p.permission?.canPublish || hasScreenShare(p));
-        if (streamers.length >= config.maxStreamers) {
-          const names = streamers.map((p) => p.name || p.identity).join(' e ');
-          return { status: 409, error: `Já tem ${config.maxStreamers} pessoas transmitindo (${names}). Espere uma vaga.` };
-        }
+        const full = slotsFull(participants);
+        if (full) return full;
 
         pendingGrants.set(identity, Date.now());
         await setPermission(identity, STREAMER_PERMISSION);
@@ -217,6 +250,66 @@ export function livekitRouter() {
       console.error('[livekit] stream/start:', err.message);
       res.status(500).json({ error: 'Não foi possível liberar a transmissão.' });
     }
+  });
+
+  // App desktop: token próprio de transmissão (participante "<id>:tela", só publica a tela)
+  router.post('/api/desktop/token', requireUser, async (req, res) => {
+    const user = req.user;
+    const identity = `${user.id}${DESKTOP_SUFFIX}`;
+    try {
+      const result = await withLock(async () => {
+        const participants = await listParticipants();
+        const ids = streamerIdentities(participants);
+        if (ids.has(user.id)) return { status: 409, error: 'Você já está transmitindo pelo navegador.' };
+        if (!ids.has(identity)) {
+          const full = slotsFull(participants);
+          if (full) return full;
+        }
+        pendingDesktop.set(identity, Date.now());
+        return { status: 200 };
+      });
+      if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+
+      await roomService.createRoom({
+        name: config.room,
+        emptyTimeout: 300,
+        maxParticipants: config.maxViewers + config.maxStreamers,
+      });
+
+      const at = new AccessToken(apiKey, apiSecret, {
+        identity,
+        name: user.name,
+        metadata: JSON.stringify({ avatar: user.avatar || '', desktop: true, owner: user.id }),
+        ttl: '12h',
+      });
+      at.addGrant({
+        roomJoin: true,
+        room: config.room,
+        canSubscribe: false, // só envia: não gasta banda recebendo as outras lives
+        canPublish: true,
+        canPublishData: false,
+        canPublishSources: [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO],
+        canUpdateOwnMetadata: false,
+      });
+      liveEvents.emit('room:update');
+      res.json({
+        token: await at.toJwt(),
+        url: config.livekit.publicUrl || config.publicUrl.replace(/^http/, 'ws'),
+        identity,
+      });
+    } catch (err) {
+      console.error('[livekit] desktop/token:', err.message);
+      res.status(500).json({ error: 'Não foi possível liberar a transmissão.' });
+    }
+  });
+
+  // Encerra a transmissão do app desktop (tira o participante "<id>:tela" da sala)
+  router.post('/api/desktop/stop', requireUser, async (req, res) => {
+    const identity = `${req.user.id}${DESKTOP_SUFFIX}`;
+    pendingDesktop.delete(identity);
+    await removeParticipant(identity);
+    liveEvents.emit('room:update');
+    res.json({ ok: true });
   });
 
   // Encerra a transmissão e devolve a vaga

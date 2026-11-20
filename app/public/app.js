@@ -226,6 +226,11 @@ document.addEventListener('click', () => {
 });
 
 function onTrackSubscribed(track, publication, participant) {
+  // A própria transmissão feita pelo app desktop: não recebe de volta (banda e eco)
+  if (state.me && participant.identity === state.me.id + DESKTOP_SUFFIX) {
+    publication.setSubscribed(false);
+    return;
+  }
   if (track.source === Track.Source.ScreenShare && track.kind === Track.Kind.Video) {
     const tile = ensureTile(participant.identity, participant.name || participant.identity);
     tile.publication = publication;
@@ -377,15 +382,29 @@ function toggleFullscreen(el) {
 
 // ---------------- presença / contadores ----------------
 
+// O app desktop transmite como um participante separado "<id>:tela".
+// Na lista de pessoas ele aparece como o próprio dono (marcado AO VIVO).
+const DESKTOP_SUFFIX = ':tela';
+const isDesktopId = (identity) => identity.endsWith(DESKTOP_SUFFIX);
+const ownerOf = (identity) => (isDesktopId(identity) ? identity.slice(0, -DESKTOP_SUFFIX.length) : identity);
+
 function participants() {
   if (!state.room) return [];
-  return [state.room.localParticipant, ...state.room.remoteParticipants.values()];
+  const all = [state.room.localParticipant, ...state.room.remoteParticipants.values()];
+  const present = new Set(all.map((p) => p.identity));
+  // Esconde o "<id>:tela" quando o dono também está na sala
+  return all.filter((p) => !isDesktopId(p.identity) || !present.has(ownerOf(p.identity)));
+}
+
+function hasScreen(p) {
+  if (!p) return false;
+  for (const pub of p.trackPublications.values()) if (pub.source === Track.Source.ScreenShare) return true;
+  return false;
 }
 
 function isStreaming(p) {
   if (p === state.room?.localParticipant) return !!state.local;
-  for (const pub of p.trackPublications.values()) if (pub.source === Track.Source.ScreenShare) return true;
-  return false;
+  return hasScreen(p) || hasScreen(state.room?.remoteParticipants.get(p.identity + DESKTOP_SUFFIX));
 }
 
 function renderPresence() {
@@ -473,6 +492,7 @@ function waitForPublishPermission(timeoutMs = 6000) {
 
 async function startStream() {
   if (state.busy || state.local || !state.room) return;
+  if (desktop) return startNativeStream();
   if (!navigator.mediaDevices?.getDisplayMedia) {
     toast('Seu navegador não suporta transmitir a tela. Use Chrome, Edge ou Firefox no computador.', true);
     return;
@@ -585,7 +605,7 @@ async function unpublishScreen() {
 
 function cleanupLocal() {
   if (!state.local) return false;
-  state.local.video.stop();
+  state.local.video?.stop();
   state.local.audio?.stop();
   state.local = null;
   removeTile('__local__');
@@ -593,10 +613,99 @@ function cleanupLocal() {
 }
 
 async function stopStream() {
+  const wasNative = !!state.local?.native;
   if (!cleanupLocal()) return;
-  await unpublishScreen();
-  if (state.room) await api('/api/stream/stop', { method: 'POST' }).catch(() => {});
+  if (wasNative) {
+    await desktop.core.invoke('stop_stream').catch(() => {});
+    await api('/api/desktop/stop', { method: 'POST' }).catch(() => {});
+  } else {
+    await unpublishScreen();
+    if (state.room) await api('/api/stream/stop', { method: 'POST' }).catch(() => {});
+  }
   renderPresence();
 }
 
+// ---------------- app desktop (Tauri) ----------------
+// Dentro do app, a captura é nativa: GPU, codec e bitrate escolhidos pelo usuário,
+// áudio do sistema sem o som do próprio app.
+
+const desktop = window.__TAURI__ || null;
+
+const DESKTOP_QUALITY = {
+  '1440p60': { width: 2560, height: 1440, fps: 60, bitrate: 14_000_000 },
+  '1080p60': { width: 1920, height: 1080, fps: 60, bitrate: 10_000_000 },
+  '1080p30': { width: 1920, height: 1080, fps: 30, bitrate: 6_000_000 },
+  '720p60': { width: 1280, height: 720, fps: 60, bitrate: 5_000_000 },
+  '720p30': { width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
+};
+
+async function setupDesktop() {
+  if (!desktop) return;
+  document.body.classList.add('is-desktop');
+  $('#desktop-opts').hidden = false;
+  $('#browser-audio-hint').hidden = true;
+  $('#opt-quality').innerHTML = `
+    <option value="1440p60">1440p • 60 fps (rede forte)</option>
+    <option value="1080p60">1080p • 60 fps (recomendado)</option>
+    <option value="1080p30">1080p • 30 fps</option>
+    <option value="720p60">720p • 60 fps</option>
+    <option value="720p30">720p • 30 fps (internet fraca)</option>`;
+  $('#opt-quality').value = store.get('desktop-quality', '1080p60');
+  $('#opt-quality').addEventListener('change', (e) => store.set('desktop-quality', e.target.value));
+  $('#opt-codec').value = store.get('desktop-codec', 'h264');
+  $('#opt-codec').addEventListener('change', (e) => store.set('desktop-codec', e.target.value));
+
+  try {
+    const monitors = await desktop.core.invoke('list_monitors');
+    $('#opt-monitor').innerHTML = monitors
+      .map((m) => `<option value="${m.index}">${m.name} (${m.width}x${m.height})${m.primary ? ' • principal' : ''}</option>`)
+      .join('');
+  } catch (err) {
+    toast(`Não consegui listar os monitores: ${err}`, true);
+  }
+
+  await desktop.event.listen('stream-state', ({ payload }) => {
+    if (payload.state === 'live') {
+      toast(`Você está ao vivo! 🔴 (${payload.encoder || 'codificador padrão'})`);
+    } else if (payload.state === 'stopped' || payload.state === 'error') {
+      if (payload.state === 'error') toast(`Transmissão encerrada: ${payload.message}`, true);
+      if (state.local?.native) {
+        cleanupLocal();
+        api('/api/desktop/stop', { method: 'POST' }).catch(() => {});
+        renderPresence();
+      }
+    }
+  });
+}
+
+async function startNativeStream() {
+  const q = DESKTOP_QUALITY[$('#opt-quality').value] || DESKTOP_QUALITY['1080p60'];
+  state.busy = true;
+  renderPresence();
+  try {
+    const { token, url } = await api('/api/desktop/token', { method: 'POST' });
+    await desktop.core.invoke('start_stream', {
+      args: {
+        url,
+        token,
+        monitor: Number($('#opt-monitor').value || 0),
+        width: q.width,
+        height: q.height,
+        fps: q.fps,
+        bitrate: q.bitrate,
+        codec: $('#opt-codec').value,
+        audio: $('#opt-audio').checked,
+      },
+    });
+    state.local = { native: true };
+  } catch (err) {
+    await api('/api/desktop/stop', { method: 'POST' }).catch(() => {});
+    toast(typeof err === 'string' ? err : err.message || 'Não foi possível transmitir.', true);
+  } finally {
+    state.busy = false;
+    renderPresence();
+  }
+}
+
 init().catch((err) => toast(err.message, true));
+setupDesktop();
