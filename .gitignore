@@ -3,3 +3,4 @@ node_modules/
 *.log
 .DS_Store
 desktop/release.conf.json
+.claude/settings.local.json
