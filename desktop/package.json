@@ -1,7 +1,7 @@
 {
   "name": "faz-o-l-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "App desktop do Faz o L (Tauri 2 + LiveKit em Rust)",
   "scripts": {
     "dev": "tauri dev",

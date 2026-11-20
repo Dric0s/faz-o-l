@@ -676,9 +676,23 @@ async function setupDesktop() {
     <option value="720p30">720p • 30 fps (internet fraca)</option>`;
   $('#opt-quality').value = store.get('desktop-quality', '1080p60');
   $('#opt-quality').addEventListener('change', (e) => store.set('desktop-quality', e.target.value));
-  // Medido no app: VP8 entrega ~55 fps em 1080p; o H.264 por software empaca em ~30
-  $('#opt-codec').value = store.get('desktop-codec-v2', 'vp8');
-  $('#opt-codec').addEventListener('change', (e) => store.set('desktop-codec-v2', e.target.value));
+  // Placa de vídeo (NVENC/AMF/QuickSync via Media Foundation), se o app suportar e houver hardware.
+  // Sem ela, VP8: medido no app, ~55 fps em 1080p (o H.264 por software empaca em ~30).
+  let gpu = null;
+  try {
+    gpu = await desktop.core.invoke('gpu_encoder');
+  } catch {
+    gpu = null; // versão antiga do app, sem o comando
+  }
+  if (gpu) {
+    const option = document.createElement('option');
+    option.value = 'gpu';
+    option.textContent = `Placa de vídeo: ${gpu.replace(/ ?Encoder ?MFT/i, '')} (recomendado)`;
+    $('#opt-codec').prepend(option);
+  }
+  $('#opt-codec').value = store.get('desktop-codec-v3', gpu ? 'gpu' : 'vp8');
+  if (!$('#opt-codec').value) $('#opt-codec').value = 'vp8';
+  $('#opt-codec').addEventListener('change', (e) => store.set('desktop-codec-v3', e.target.value));
   $('#opt-preview').checked = selfPreviewEnabled();
   $('#opt-preview').addEventListener('change', (e) => {
     store.set('self-preview', e.target.checked ? '1' : '0');

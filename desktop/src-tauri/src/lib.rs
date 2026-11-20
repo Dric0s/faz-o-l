@@ -18,6 +18,8 @@ pub fn run_test_stream(args: &[String]) -> i32 {
 mod audio;
 #[cfg(windows)]
 mod capture;
+#[cfg(windows)]
+mod hwenc;
 
 pub fn run() {
     tauri::Builder::default()
@@ -26,6 +28,7 @@ pub fn run() {
             server::get_server,
             server::set_server,
             stream::list_monitors,
+            stream::gpu_encoder,
             stream::start_stream,
             stream::stop_stream,
         ])

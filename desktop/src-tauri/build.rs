@@ -6,6 +6,7 @@ fn main() {
             "get_server",
             "set_server",
             "list_monitors",
+            "gpu_encoder",
             "start_stream",
             "stop_stream",
         ]),

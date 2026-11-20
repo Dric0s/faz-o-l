@@ -46,6 +46,7 @@ fn allow_remote(app: &AppHandle, origin: &Url) {
         .window("main")
         .permission("core:event:default")
         .permission("allow-list-monitors")
+        .permission("allow-gpu-encoder")
         .permission("allow-start-stream")
         .permission("allow-stop-stream");
     if let Err(err) = app.add_capability(capability) {

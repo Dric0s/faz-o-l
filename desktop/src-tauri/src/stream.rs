@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
+use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoEncoding};
 use livekit::prelude::*;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
@@ -36,6 +36,7 @@ pub struct Session {
     stop: Arc<AtomicBool>,
     #[cfg(windows)]
     capture: Option<crate::capture::Control>,
+    encoder_thread: Option<JoinHandle<()>>,
     audio_thread: Option<JoinHandle<()>>,
 }
 
@@ -62,7 +63,7 @@ pub async fn teardown(session: Session) {
     if let Some(control) = session.capture {
         let _ = control.stop();
     }
-    if let Some(handle) = session.audio_thread {
+    for handle in [session.encoder_thread, session.audio_thread].into_iter().flatten() {
         let _ = tauri::async_runtime::spawn_blocking(move || handle.join()).await;
     }
     let _ = session.room.close().await;
@@ -77,9 +78,50 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
     let stop = Arc::new(AtomicBool::new(false));
 
     // ---- vídeo ----
-    let video_source = NativeVideoSource::new(VideoResolution { width: args.width, height: args.height }, true);
+    let resolution = VideoResolution { width: args.width, height: args.height };
+    #[cfg(windows)]
+    let (width, height) = crate::capture::output_size(args.monitor, args.width, args.height);
+
+    // Placa de vídeo: o H.264 sai pronto do hardware e o LiveKit só repassa
+    #[cfg(windows)]
+    let mut hardware = None;
+    #[cfg(windows)]
+    if args.codec == "gpu" {
+        let source = NativeVideoSource::new_encoded(VideoResolution { width, height });
+        match tauri::async_runtime::spawn_blocking({
+            let source = source.clone();
+            let stop = stop.clone();
+            let (fps, bitrate) = (args.fps, args.bitrate.min(u32::MAX as u64) as u32);
+            move || crate::hwenc::spawn(source, width, height, fps, bitrate, stop)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        {
+            Ok(handle) => hardware = Some((source, handle)),
+            Err(e) => log::warn!("{e} — usando VP8 por software"),
+        }
+    }
+
+    #[cfg(windows)]
+    let use_hardware = hardware.is_some();
+    #[cfg(not(windows))]
+    let use_hardware = false;
+
+    let (video_source, codec, codec_name, encoder_backend, encoder_name) = if use_hardware {
+        #[cfg(windows)]
+        {
+            let (source, handle) = hardware.as_ref().unwrap();
+            (source.clone(), VideoCodec::H264, "H.264 (placa de vídeo)", VideoEncoderBackend::PreEncoded, handle.name.clone())
+        }
+        #[cfg(not(windows))]
+        unreachable!()
+    } else {
+        let requested = if args.codec == "gpu" { "vp8" } else { args.codec.as_str() };
+        let (codec, name) = codec_of(requested);
+        (NativeVideoSource::new(resolution, true), codec, name, VideoEncoderBackend::Auto, "software".to_string())
+    };
+
     let video_track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(video_source.clone()));
-    let (codec, codec_name) = codec_of(&args.codec);
     let publish = room
         .local_participant()
         .publish_track(
@@ -87,8 +129,9 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
+                video_encoder: encoder_backend,
                 video_encoding: Some(VideoEncoding { max_bitrate: args.bitrate, max_framerate: args.fps as f64 }),
-                // Codificação por software: uma camada só (simulcast dobraria o uso de CPU)
+                // Uma camada só: simulcast dobraria o trabalho de codificação
                 simulcast: false,
                 stream: "screen".into(),
                 ..Default::default()
@@ -101,11 +144,20 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
     }
 
     #[cfg(windows)]
+    let (sink, encoder_thread) = match hardware {
+        Some((_, handle)) => (
+            crate::capture::Sink::Hardware { sender: handle.sender, width, height },
+            Some(handle.thread),
+        ),
+        None => (crate::capture::Sink::Raw(video_source), None),
+    };
+
+    #[cfg(windows)]
     let capture = match crate::capture::start(
         args.monitor,
         args.fps,
         crate::capture::Flags {
-            source: video_source,
+            sink,
             stop: stop.clone(),
             max_width: args.width,
             max_height: args.height,
@@ -148,16 +200,31 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
         }
     }
 
-    let label = format!("{codec_name} • {}x{} {} fps", args.width, args.height, args.fps);
+    let label = format!("{codec_name} • {}x{} {} fps • {encoder_name}", args.width, args.height, args.fps);
     let session = Session {
         room,
         video_track,
         stop,
         #[cfg(windows)]
         capture,
+        #[cfg(windows)]
+        encoder_thread,
+        #[cfg(not(windows))]
+        encoder_thread: None,
         audio_thread,
     };
     Ok((session, events, label))
+}
+
+/// Nome do codificador de hardware (placa de vídeo), se houver.
+#[tauri::command]
+pub fn gpu_encoder() -> Option<String> {
+    #[cfg(windows)]
+    {
+        return crate::hwenc::probe();
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 #[tauri::command]
