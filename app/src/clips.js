@@ -19,7 +19,7 @@ const CLIPS_DIR = process.env.CLIPS_DIR || '/data/clips';
 const RECORDER_URL = process.env.RECORDER_URL || 'http://recorder:8090';
 const UNSAVED_TTL_MS = 24 * 60 * 60 * 1000;
 const PUBLISH_FALLBACK_MS = 3 * 60 * 1000; // sem título em 3 min: posta no Discord assim mesmo
-const ALLOWED_SECONDS = [30, 60, 120];
+const ALLOWED_SECONDS = [30, 60, 120, 180];
 const TITLE_MAX = 100;
 const DESCRIPTION_MAX = 500;
 

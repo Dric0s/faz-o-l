@@ -173,6 +173,7 @@
         <div class="panel">
           <h3>Clipes <span id="clips-count" class="muted"></span></h3>
           <p class="hint">Passe o mouse numa live e clique em <b>✂ Clipar</b>. Clipes não salvos somem em 24 h.</p>
+          <p class="hint" id="hotkeys-hint" hidden>Atalhos (mesmo dentro do jogo): <b>Ctrl+F9</b> 30 s • <b>Ctrl+F10</b> 1 min • <b>Ctrl+F11</b> 3 min. Clipa a sua live, ou a que estiver em destaque.</p>
           <ul id="clips" class="clips"></ul>
         </div>
 
@@ -267,7 +268,7 @@
           <div class="clip-menu" hidden>
             <button data-seconds="30">Últimos 30 s</button>
             <button data-seconds="60">Último 1 min</button>
-            <button data-seconds="120">Últimos 2 min</button>
+            <button data-seconds="180">Últimos 3 min</button>
           </div>
         </div>
         <button class="ctl ctl-stop" title="Parar transmissão" hidden>■ Parar</button>

@@ -34,7 +34,7 @@ const (
 	identityRecorder = "fazol-recorder"
 	segmentSeconds   = 4
 	keyframeEvery    = 3 * time.Second
-	keepBuffer       = 210 * time.Second // ~3,5 min (clipe máximo de 2 min + folga)
+	keepBuffer       = 240 * time.Second // 4 min (clipe máximo de 3 min + folga)
 	restartDebounce  = 1500 * time.Millisecond
 )
 

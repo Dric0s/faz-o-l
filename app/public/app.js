@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-21.4';
+const SITE_VERSION = '2026-11-21.5';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -537,7 +537,7 @@ function ensureTile(id, name, isLocal = false) {
     if (!e.target.closest('.tile-controls')) toggleFullscreen(el);
   });
 
-  // ✂ Clipar: os últimos 30 s / 1 min / 2 min desta live (gerado no servidor)
+  // ✂ Clipar: os últimos 30 s / 1 min / 3 min desta live (gerado no servidor)
   const clipMenu = el.querySelector('.clip-menu');
   el.querySelector('.ctl-clip').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1514,6 +1514,7 @@ async function setupDesktop() {
   }
   document.body.classList.add('is-desktop');
   $('#desktop-opts').hidden = false;
+  $('#hotkeys-hint').hidden = false;
   $('#browser-audio-hint').hidden = true;
   $('#opt-quality').innerHTML = `
     <option value="1440p60">1440p • 60 fps (rede forte)</option>
@@ -1574,6 +1575,33 @@ async function setupDesktop() {
       }
     }
   });
+
+  // Atalhos globais (Ctrl+F9/F10/F11): clipa sem abrir o diálogo, porque você está no jogo
+  await desktop.event.listen('clip-hotkey', ({ payload }) => hotkeyClip(Number(payload)));
+}
+
+let hotkeyBusy = false;
+async function hotkeyClip(seconds) {
+  if (!state.room || hotkeyBusy) return;
+  // Alvo: a sua live (se estiver transmitindo), senão a live em destaque, senão a única aberta
+  let streamer = null;
+  if (state.local) streamer = state.me.id;
+  else if (state.focus && state.tiles.has(state.focus)) streamer = state.focus;
+  else if (state.tiles.size === 1) streamer = [...state.tiles.keys()][0];
+  if (streamer === '__local__') streamer = state.me.id;
+  if (!streamer) return toast('Atalho de clipe: coloque uma live em destaque (⤢) para saber qual clipar.', true);
+  hotkeyBusy = true;
+  toast(`✂ Gerando clipe dos últimos ${lengthLabel(seconds)}…`);
+  try {
+    const clip = await api(ch('/clips'), { method: 'POST', body: { streamer, seconds } });
+    await api(`/api/clips/${clip.id}`, { method: 'PATCH', body: { publish: true } });
+    toast(`Clipe de ${lengthLabel(seconds)} publicado! Dá pra pôr título depois na lista de clipes.`);
+    loadClips();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    hotkeyBusy = false;
+  }
 }
 
 // Monitores + janelas (jogos primeiro). A escolha é lembrada pelo nome do processo,

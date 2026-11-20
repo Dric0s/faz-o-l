@@ -6,6 +6,7 @@
 //! app e envio direto para o LiveKit.
 
 mod headless;
+mod hotkeys;
 mod server;
 mod stream;
 mod updater;
@@ -25,6 +26,7 @@ mod hwenc;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(hotkeys::plugin())
         .manage(stream::StreamState::default())
         .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
@@ -41,6 +43,7 @@ pub fn run() {
         .setup(|app| {
             server::open_main_window(app.handle())?;
             updater::spawn(app.handle().clone());
+            hotkeys::register(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
