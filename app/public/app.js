@@ -978,8 +978,8 @@ async function loadClips() {
     clipsView.clips = clips;
     renderClipsPanel(clips);
     if ($('#dlg-clips').open) renderClipsDialog();
-  } catch {
-    /* sem clipes por enquanto */
+  } catch (err) {
+    console.warn('[clipes]', err); // sem clipes por enquanto
   }
 }
 
