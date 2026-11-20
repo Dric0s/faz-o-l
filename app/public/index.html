@@ -140,8 +140,18 @@
             </select>
           </label>
           <div id="desktop-opts" class="stack" hidden>
-            <label class="field">Monitor
-              <select id="opt-monitor"></select>
+            <label class="field">O que transmitir
+              <span class="row nowrap">
+                <select id="opt-monitor"></select>
+                <button type="button" id="btn-refresh-sources" class="btn btn-ghost btn-sm" title="Atualizar a lista de janelas">↻</button>
+              </span>
+            </label>
+            <label class="check"><input type="checkbox" id="opt-stretch" /> Esticar 4:3 pra 16:9 (CS esticado)</label>
+            <label class="field">Som
+              <select id="opt-audio-mode">
+                <option value="system">Do PC todo (menos o Faz o L)</option>
+                <option value="game">Só da janela escolhida (sem Discord/música)</option>
+              </select>
             </label>
             <label class="field">Codec
               <select id="opt-codec">

@@ -33,6 +33,9 @@ pub fn run(args: &[String]) -> i32 {
         height: arg(args, 8, 1080),
         bitrate: arg(args, 9, 10_000_000),
         audio: arg::<u8>(args, 10, 1) == 1,
+        window: None,
+        stretch: false,
+        audio_mode: None,
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio");

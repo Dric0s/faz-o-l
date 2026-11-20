@@ -33,6 +33,7 @@ pub fn run() {
             server::get_server,
             server::set_server,
             stream::list_monitors,
+            stream::list_windows,
             stream::gpu_encoder,
             stream::start_stream,
             stream::stop_stream,

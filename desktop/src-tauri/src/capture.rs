@@ -1,4 +1,8 @@
-//! Captura do monitor com Windows Graphics Capture (GPU) e envio dos quadros ao LiveKit.
+//! Captura de um monitor ou da janela de um jogo com Windows Graphics Capture (GPU)
+//! e envio dos quadros ao LiveKit.
+//!
+//! "Esticar 4:3": pega a parte 4:3 do centro da imagem (jogo em 4:3 com ou sem
+//! faixas pretas) e estica pra 16:9, como o CS esticado aparece pra quem joga.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -18,9 +22,51 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
+use windows_capture::window::Window;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type Control = CaptureControl<ScreenHandler, BoxError>;
+
+/// O que transmitir.
+#[derive(Clone, Copy, Debug)]
+pub enum Target {
+    /// Índice do monitor (0 = principal)
+    Monitor(usize),
+    /// HWND da janela (jogo ou programa)
+    Window(isize),
+}
+
+impl Target {
+    fn window(hwnd: isize) -> Window {
+        Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void)
+    }
+
+    fn monitor(index: usize) -> Result<Monitor, String> {
+        (if index == 0 { Monitor::primary() } else { Monitor::from_index(index) }).map_err(|e| format!("Monitor não encontrado: {e}"))
+    }
+
+    /// Tamanho atual em pixels.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        match *self {
+            Target::Monitor(i) => {
+                let m = Self::monitor(i).ok()?;
+                Some((m.width().ok()?, m.height().ok()?))
+            }
+            Target::Window(hwnd) => {
+                let w = Self::window(hwnd);
+                Some((w.width().ok()?.max(2) as u32, w.height().ok()?.max(2) as u32))
+            }
+        }
+    }
+
+    /// PID do processo da janela (pra capturar só o som do jogo).
+    pub fn process_id(&self) -> Option<u32> {
+        match *self {
+            Target::Window(hwnd) => Self::window(hwnd).process_id().ok(),
+            Target::Monitor(_) => None,
+        }
+    }
+}
 
 /// Para onde vão os quadros capturados.
 pub enum Sink {
@@ -30,35 +76,54 @@ pub enum Sink {
     Hardware { sender: SyncSender<Nv12Frame>, width: u32, height: u32 },
 }
 
-/// Tamanho final dos quadros pra um monitor, respeitando o limite pedido.
-pub fn output_size(monitor_index: usize, max_width: u32, max_height: u32) -> (u32, u32) {
-    let monitor = if monitor_index == 0 { Monitor::primary() } else { Monitor::from_index(monitor_index) };
-    match monitor {
-        Ok(m) => fit(m.width().unwrap_or(max_width), m.height().unwrap_or(max_height), max_width, max_height),
-        Err(_) => (max_width & !1, max_height & !1),
+/// Maior tamanho (par) que cabe em max_w x max_h mantendo a proporção.
+fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w <= max_w && h <= max_h {
+        return (w.max(2) & !1, h.max(2) & !1);
+    }
+    let scale = f64::min(max_w as f64 / w as f64, max_h as f64 / h as f64);
+    (((w as f64 * scale) as u32).max(2) & !1, ((h as f64 * scale) as u32).max(2) & !1)
+}
+
+/// Largura da parte 4:3 do centro (ou a imagem toda, se já for mais estreita).
+fn crop_43(w: u32, h: u32) -> u32 {
+    w.min(h * 4 / 3) & !1
+}
+
+/// Tamanho esticado pra 16:9 (sem aumentar a altura da fonte nem passar do limite).
+fn stretch_169(h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    let mut out_h = h.min(max_h);
+    let mut out_w = out_h * 16 / 9;
+    if out_w > max_w {
+        out_w = max_w;
+        out_h = out_w * 9 / 16;
+    }
+    (out_w.max(2) & !1, out_h.max(2) & !1)
+}
+
+/// Tamanho final dos quadros para o alvo, respeitando o limite pedido.
+pub fn output_size(target: Target, max_width: u32, max_height: u32, stretch: bool) -> (u32, u32) {
+    let (w, h) = target.size().unwrap_or((max_width, max_height));
+    if stretch {
+        stretch_169(h, max_width, max_height)
+    } else {
+        fit(w, h, max_width, max_height)
     }
 }
 
 pub struct Flags {
     pub sink: Sink,
     pub stop: Arc<AtomicBool>,
-    /// Resolução máxima enviada (o quadro é reduzido se o monitor for maior)
+    /// Resolução máxima enviada (o quadro é reduzido se a fonte for maior)
     pub max_width: u32,
     pub max_height: u32,
+    /// Esticar a parte 4:3 do centro para 16:9
+    pub stretch: bool,
 }
 
 pub struct ScreenHandler {
     flags: Flags,
     started: Instant,
-}
-
-/// Maior tamanho (par) que cabe em max_w x max_h mantendo a proporção.
-fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-    if w <= max_w && h <= max_h {
-        return (w & !1, h & !1);
-    }
-    let scale = f64::min(max_w as f64 / w as f64, max_h as f64 / h as f64);
-    (((w as f64 * scale) as u32) & !1, ((h as f64 * scale) as u32) & !1)
 }
 
 impl GraphicsCaptureApiHandler for ScreenHandler {
@@ -79,21 +144,27 @@ impl GraphicsCaptureApiHandler for ScreenHandler {
             return Ok(());
         }
 
-        let width = frame.width() & !1;
-        let height = frame.height() & !1;
-        let (out_w, out_h) = fit(width, height, self.flags.max_width, self.flags.max_height);
+        let src_w = frame.width() & !1;
+        let src_h = frame.height() & !1;
+        if src_w < 2 || src_h < 2 {
+            return Ok(()); // janela minimizada
+        }
+        // Região usada da imagem: inteira, ou só o 4:3 do centro (esticar)
+        let (width, height) = (if self.flags.stretch { crop_43(src_w, src_h) } else { src_w }, src_h);
+        let crop_x = ((src_w - width) / 2) & !1;
+
+        // Tamanho de saída: fixo pra placa de vídeo e no modo esticado; senão segue a fonte
+        let (out_w, out_h) = match &self.flags.sink {
+            Sink::Hardware { width, height, .. } => (*width, *height),
+            Sink::Raw(_) if self.flags.stretch => stretch_169(height, self.flags.max_width, self.flags.max_height),
+            Sink::Raw(_) => fit(width, height, self.flags.max_width, self.flags.max_height),
+        };
+
         let timestamp_us = self.started.elapsed().as_micros() as i64;
         let mut buffer = frame.buffer()?;
         let pitch = buffer.row_pitch();
-        let bgra = buffer.as_raw_buffer();
-
-        // O codificador de hardware foi aberto num tamanho fixo: se a resolução do
-        // monitor mudou no meio da live, descarta em vez de mandar quadro quebrado
-        if let Sink::Hardware { width: hw_w, height: hw_h, .. } = &self.flags.sink {
-            if (out_w, out_h) != (*hw_w, *hw_h) {
-                return Ok(());
-            }
-        }
+        let raw = buffer.as_raw_buffer();
+        let bgra = &raw[(crop_x * 4) as usize..];
 
         // Placa de vídeo sem redimensionar: BGRA -> NV12 direto, uma conversão só
         if let Sink::Hardware { sender, .. } = &self.flags.sink {
@@ -106,7 +177,7 @@ impl GraphicsCaptureApiHandler for ScreenHandler {
             }
         }
 
-        // BGRA (que o libyuv chama de "ARGB") -> I420 (+ redução, se o monitor for maior)
+        // BGRA (que o libyuv chama de "ARGB") -> I420 (+ redimensiona/estica)
         let mut i420 = I420Buffer::new(width, height);
         let (stride_y, stride_u, stride_v) = i420.strides();
         let (y, u, v) = i420.data_mut();
@@ -136,28 +207,40 @@ impl GraphicsCaptureApiHandler for ScreenHandler {
         }
         Ok(())
     }
+
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        log::info!("captura encerrada (janela fechada?)");
+        Ok(())
+    }
 }
 
-pub fn start(monitor_index: usize, fps: u32, flags: Flags) -> Result<Control, String> {
-    let monitor = if monitor_index == 0 {
-        Monitor::primary()
-    } else {
-        Monitor::from_index(monitor_index)
-    }
-    .map_err(|e| format!("Monitor não encontrado: {e}"))?;
-
+pub fn start(target: Target, fps: u32, flags: Flags) -> Result<Control, String> {
     let interval = Duration::from_micros(1_000_000 / fps.max(1) as u64);
-    let settings = Settings::new(
-        monitor,
-        CursorCaptureSettings::WithCursor,
-        DrawBorderSettings::WithoutBorder,
-        SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Custom(interval),
-        DirtyRegionSettings::Default,
-        ColorFormat::Bgra8,
-        flags,
-    );
-    ScreenHandler::start_free_threaded(settings).map_err(|e| format!("Falha ao iniciar a captura: {e}"))
+    macro_rules! run {
+        ($item:expr) => {
+            ScreenHandler::start_free_threaded(Settings::new(
+                $item,
+                CursorCaptureSettings::WithCursor,
+                DrawBorderSettings::WithoutBorder,
+                SecondaryWindowSettings::Default,
+                MinimumUpdateIntervalSettings::Custom(interval),
+                DirtyRegionSettings::Default,
+                ColorFormat::Bgra8,
+                flags,
+            ))
+            .map_err(|e| format!("Falha ao iniciar a captura: {e}"))
+        };
+    }
+    match target {
+        Target::Monitor(index) => run!(Target::monitor(index)?),
+        Target::Window(hwnd) => {
+            let window = Target::window(hwnd);
+            if !window.is_valid() {
+                return Err("A janela escolhida não existe mais. Atualize a lista e escolha de novo.".into());
+            }
+            run!(window)
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -185,4 +268,92 @@ pub fn monitors() -> Result<Vec<MonitorInfo>, String> {
             })
         })
         .collect())
+}
+
+/// Jogos conhecidos (aparecem primeiro na lista, com nome bonito).
+const KNOWN_GAMES: &[(&str, &str)] = &[
+    ("cs2.exe", "Counter-Strike 2"),
+    ("csgo.exe", "Counter-Strike"),
+    ("valorant-win64-shipping.exe", "VALORANT"),
+    ("league of legends.exe", "League of Legends"),
+    ("r5apex.exe", "Apex Legends"),
+    ("r5apex_dx12.exe", "Apex Legends"),
+    ("fortniteclient-win64-shipping.exe", "Fortnite"),
+    ("dota2.exe", "Dota 2"),
+    ("gta5.exe", "GTA V"),
+    ("gta5_enhanced.exe", "GTA V"),
+    ("rocketleague.exe", "Rocket League"),
+    ("overwatch.exe", "Overwatch 2"),
+    ("minecraft.exe", "Minecraft"),
+    ("javaw.exe", "Minecraft (Java)"),
+    ("eldenring.exe", "Elden Ring"),
+    ("rainbowsix.exe", "Rainbow Six Siege"),
+    ("tslgame.exe", "PUBG"),
+    ("cod.exe", "Call of Duty"),
+    ("fc25.exe", "EA FC"),
+    ("fc26.exe", "EA FC"),
+];
+
+/// Processos que não fazem sentido transmitir (janelas do sistema).
+const IGNORED: &[&str] = &["textinputhost.exe", "applicationframehost.exe", "shellexperiencehost.exe", "searchhost.exe", "startmenuexperiencehost.exe", "systemsettings.exe", "lockapp.exe"];
+
+#[derive(serde::Serialize)]
+pub struct WindowInfo {
+    /// HWND (como texto: o JavaScript não guarda inteiros de 64 bits com segurança)
+    pub id: String,
+    pub title: String,
+    pub process: String,
+    /// Nome do jogo, se for um jogo conhecido
+    pub game: Option<String>,
+    pub width: i32,
+    pub height: i32,
+}
+
+pub fn windows() -> Result<Vec<WindowInfo>, String> {
+    let own_pid = std::process::id();
+    let mut list: Vec<WindowInfo> = Window::enumerate()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter_map(|w| {
+            if w.process_id().ok()? == own_pid {
+                return None;
+            }
+            let title = w.title().ok()?.trim().to_string();
+            let process = exe_name(w.process_id().ok()?).or_else(|| w.process_name().ok()).unwrap_or_default();
+            let lower = process.to_lowercase();
+            if title.is_empty() || IGNORED.contains(&lower.as_str()) {
+                return None;
+            }
+            let (width, height) = (w.width().ok()?, w.height().ok()?);
+            if width < 160 || height < 120 {
+                return None;
+            }
+            let game = KNOWN_GAMES.iter().find(|(exe, _)| *exe == lower).map(|(_, name)| name.to_string());
+            Some(WindowInfo { id: (w.as_raw_hwnd() as isize).to_string(), title, process, game, width, height })
+        })
+        .collect();
+    list.sort_by_key(|w| (w.game.is_none(), w.title.to_lowercase()));
+    Ok(list)
+}
+
+/// Nome do executável do processo. Usa a consulta "limitada", que funciona até com
+/// jogos protegidos por anti-cheat (Vanguard, EAC), onde ler o módulo é negado.
+fn exe_name(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit(['\', '/']).next().map(str::to_string)
+    }
 }

@@ -359,23 +359,37 @@ type clipRequest struct {
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{6,32}$`)
 
-func makeClip(req clipRequest) (map[string]any, error) {
-	mu.Lock()
-	rec := records[recordKey(req.Room, req.Identity)]
-	mu.Unlock()
-	if rec == nil {
-		return nil, fmt.Errorf("essa live não está sendo gravada")
-	}
-	rec.scan()
+// errTooEarly: a live acabou de começar e ainda não tem nada gravado.
+var errTooEarly = fmt.Errorf("a live acabou de começar, ainda não tem nada gravado")
 
-	rec.mu.Lock()
-	segs := append([]segment(nil), rec.segments...)
-	mime := rec.videoMime
-	rec.mu.Unlock()
-	sort.Slice(segs, func(i, j int) bool { return segs[i].start.Before(segs[j].start) })
-	if len(segs) == 0 {
-		return nil, fmt.Errorf("ainda não há nada gravado dessa live")
+func makeClip(req clipRequest) (map[string]any, error) {
+	ensureJoined(req.Room)
+
+	// Live que acabou de começar: espera o gravador entrar e o primeiro pedaço sair
+	var rec *recording
+	var segs []segment
+	var mime string
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		rec = records[recordKey(req.Room, req.Identity)]
+		mu.Unlock()
+		if rec != nil {
+			rec.scan()
+			rec.mu.Lock()
+			segs = append([]segment(nil), rec.segments...)
+			mime = rec.videoMime
+			rec.mu.Unlock()
+			if len(segs) > 0 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, errTooEarly
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
+	sort.Slice(segs, func(i, j int) bool { return segs[i].start.Before(segs[j].start) })
 
 	// Começa no último pedaço que inicia antes de "agora - N" (sempre num quadro-chave)
 	target := time.Now().Add(-time.Duration(req.Seconds) * time.Second)
@@ -437,11 +451,20 @@ func serveHTTP() {
 		res, err := makeClip(req)
 		if err != nil {
 			log.Printf("clipe falhou: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if err == errTooEarly {
+				status = http.StatusConflict
+			}
+			w.WriteHeader(status)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(res)
+	})
+	// O site avisa assim que uma live começa: o gravador entra na hora (sem esperar a varredura)
+	http.HandleFunc("/join", func(w http.ResponseWriter, r *http.Request) {
+		ensureJoined(r.URL.Query().Get("room"))
+		w.WriteHeader(http.StatusNoContent)
 	})
 	log.Printf("API de clipes em %s", listenAddr)
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
@@ -523,13 +546,33 @@ func joinRoom(name string) {
 	}
 }
 
+var joining = map[string]bool{} // salas com entrada em andamento (protegido por roomsMu)
+
+// Entra na sala em segundo plano, se ainda não estiver nela.
+func ensureJoined(name string) {
+	if name == "" {
+		return
+	}
+	roomsMu.Lock()
+	defer roomsMu.Unlock()
+	if rooms[name] != nil || joining[name] {
+		return
+	}
+	joining[name] = true
+	go func() {
+		joinRoom(name)
+		roomsMu.Lock()
+		delete(joining, name)
+		roomsMu.Unlock()
+	}()
+}
+
 // Fica de olho nas salas do LiveKit: entra nas que têm alguém transmitindo e sai
 // das que ficaram sem live (os pedaços gravados continuam valendo pra clipar).
 func watchRooms() {
 	httpURL := strings.Replace(strings.Replace(livekitURL, "wss://", "https://", 1), "ws://", "http://", 1)
 	client := lksdk.NewRoomServiceClient(httpURL, apiKey, apiSecret)
 	idleSince := map[string]time.Time{}
-	joining := map[string]bool{}
 
 	for range time.Tick(2 * time.Second) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -551,19 +594,11 @@ func watchRooms() {
 		for name, room := range rooms {
 			current[name] = room
 		}
+		roomsMu.Unlock()
 		for name := range live {
 			delete(idleSince, name)
-			if current[name] == nil && !joining[name] {
-				joining[name] = true
-				go func(name string) {
-					joinRoom(name)
-					roomsMu.Lock()
-					delete(joining, name)
-					roomsMu.Unlock()
-				}(name)
-			}
+			ensureJoined(name)
 		}
-		roomsMu.Unlock()
 		for name, room := range current {
 			if live[name] {
 				continue

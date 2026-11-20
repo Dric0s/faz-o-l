@@ -28,6 +28,15 @@ pub struct StartArgs {
     pub bitrate: u64,
     pub codec: String,
     pub audio: bool,
+    /// HWND da janela (jogo) a transmitir; vazio = monitor
+    #[serde(default)]
+    pub window: Option<String>,
+    /// Esticar a parte 4:3 do centro para 16:9 (CS esticado)
+    #[serde(default)]
+    pub stretch: bool,
+    /// "game" = só o som da janela escolhida; senão, o som do PC todo (menos o app)
+    #[serde(default)]
+    pub audio_mode: Option<String>,
 }
 
 pub struct Session {
@@ -86,7 +95,12 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
     // ---- vídeo ----
     let resolution = VideoResolution { width: args.width, height: args.height };
     #[cfg(windows)]
-    let (width, height) = crate::capture::output_size(args.monitor, args.width, args.height);
+    let target = match args.window.as_deref().and_then(|w| w.parse::<isize>().ok()) {
+        Some(hwnd) => crate::capture::Target::Window(hwnd),
+        None => crate::capture::Target::Monitor(args.monitor),
+    };
+    #[cfg(windows)]
+    let (width, height) = crate::capture::output_size(target, args.width, args.height, args.stretch);
 
     // Placa de vídeo: o H.264 sai pronto do hardware e o LiveKit só repassa
     #[cfg(windows)]
@@ -160,13 +174,14 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
 
     #[cfg(windows)]
     let capture = match crate::capture::start(
-        args.monitor,
+        target,
         args.fps,
         crate::capture::Flags {
             sink,
             stop: stop.clone(),
             max_width: args.width,
             max_height: args.height,
+            stretch: args.stretch,
         },
     ) {
         Ok(control) => Some(control),
@@ -201,12 +216,17 @@ pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceive
             )
             .await;
         match published {
-            Ok(_) => audio_thread = Some(crate::audio::spawn(audio_source, stop.clone())),
+            Ok(_) => {
+                let only = if args.audio_mode.as_deref() == Some("game") { target.process_id() } else { None };
+                audio_thread = Some(crate::audio::spawn(audio_source, stop.clone(), only));
+            }
             Err(e) => log::warn!("sem áudio: {e}"),
         }
     }
 
-    let label = format!("{codec_name} • {}x{} {} fps • {encoder_name}", args.width, args.height, args.fps);
+    #[cfg(not(windows))]
+    let (width, height) = (args.width, args.height);
+    let label = format!("{codec_name} • {width}x{height} {} fps • {encoder_name}", args.fps);
     let session = Session {
         room,
         video_track,
@@ -238,6 +258,17 @@ pub fn list_monitors() -> Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
         return crate::capture::monitors().map(|m| json!(m));
+    }
+    #[allow(unreachable_code)]
+    Err("Captura nativa disponível só no Windows por enquanto.".into())
+}
+
+/// Janelas abertas (jogos conhecidos primeiro).
+#[tauri::command]
+pub fn list_windows() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        return crate::capture::windows().map(|w| json!(w));
     }
     #[allow(unreachable_code)]
     Err("Captura nativa disponível só no Windows por enquanto.".into())

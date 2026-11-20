@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-21.1';
+const SITE_VERSION = '2026-11-21.2';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -1506,14 +1506,21 @@ async function setupDesktop() {
     applySelfPreview();
   });
 
-  try {
-    const monitors = await desktop.core.invoke('list_monitors');
-    $('#opt-monitor').innerHTML = monitors
-      .map((m) => `<option value="${m.index}">${m.name} (${m.width}x${m.height})${m.primary ? ' • principal' : ''}</option>`)
-      .join('');
-  } catch (err) {
-    toast(`Não consegui listar os monitores: ${err}`, true);
-  }
+  await loadSources();
+  $('#btn-refresh-sources').addEventListener('click', () => loadSources());
+  // Jogo aberto depois: a lista se atualiza sozinha (menos enquanto o seletor está aberto)
+  setInterval(() => {
+    if (!state.local && document.activeElement !== $('#opt-monitor')) loadSources({ quiet: true });
+  }, 10_000);
+  $('#opt-monitor').addEventListener('change', () => {
+    const option = $('#opt-monitor').selectedOptions[0];
+    store.set('desktop-source', option?.dataset.key || 'm:0');
+    updateSourceOptions();
+  });
+  $('#opt-stretch').checked = store.get('desktop-stretch', '0') === '1';
+  $('#opt-stretch').addEventListener('change', (e) => store.set('desktop-stretch', e.target.checked ? '1' : '0'));
+  $('#opt-audio-mode').value = store.get('desktop-audio-mode', 'system');
+  $('#opt-audio-mode').addEventListener('change', (e) => store.set('desktop-audio-mode', e.target.value));
 
   await desktop.event.listen('stream-state', ({ payload }) => {
     if (payload.state === 'live') {
@@ -1529,8 +1536,74 @@ async function setupDesktop() {
   });
 }
 
+// Monitores + janelas (jogos primeiro). A escolha é lembrada pelo nome do processo,
+// porque o identificador da janela muda toda vez que o jogo abre.
+let windowsSupported = true;
+async function loadSources({ quiet = false } = {}) {
+  const select = $('#opt-monitor');
+  if (select.dataset.loading) return;
+  select.dataset.loading = '1';
+  const current = select.selectedOptions[0]?.dataset.key || store.get('desktop-source', 'm:0');
+  try {
+    const monitors = await desktop.core.invoke('list_monitors').catch((err) => {
+      if (!quiet) toast(`Não consegui listar os monitores: ${err}`, true);
+      return [];
+    });
+    let windows = [];
+    try {
+      windows = await desktop.core.invoke('list_windows');
+    } catch {
+      windowsSupported = false; // app antigo: só monitor
+    }
+
+    const group = (label, items) => {
+      const g = document.createElement('optgroup');
+      g.label = label;
+      g.append(...items);
+      return g;
+    };
+    const option = (text, value, key) => {
+      const o = new Option(text, value);
+      o.dataset.key = key;
+      return o;
+    };
+    const monitorOptions = monitors.map((m) =>
+      option(`🖥 ${m.name} (${m.width}x${m.height})${m.primary ? ' • principal' : ''}`, `m:${m.index}`, `m:${m.index}`));
+    const games = windows.filter((w) => w.game);
+    const others = windows.filter((w) => !w.game);
+    const windowOption = (w) => {
+      const label = w.game ? `🎮 ${w.game}` : `🪟 ${w.title.slice(0, 60)}`;
+      return option(label, `w:${w.id}`, `p:${(w.process || w.title).toLowerCase()}`);
+    };
+    const groups = [group('Monitores', monitorOptions)];
+    if (games.length) groups.push(group('Jogos abertos', games.map(windowOption)));
+    if (others.length) groups.push(group('Janelas', others.map(windowOption)));
+    select.replaceChildren(...groups);
+
+    const match = [...select.options].find((o) => o.dataset.key === current);
+    if (match) select.value = match.value;
+  } finally {
+    delete select.dataset.loading;
+    updateSourceOptions();
+  }
+}
+
+function updateSourceOptions() {
+  const isWindow = $('#opt-monitor').value.startsWith('w:');
+  $('#btn-refresh-sources').hidden = !windowsSupported;
+  $('#opt-stretch').closest('label').hidden = !windowsSupported;
+  $('#opt-audio-mode').closest('label').hidden = !windowsSupported || !isWindow;
+}
+
+function selectedSource() {
+  const value = $('#opt-monitor').value || 'm:0';
+  if (value.startsWith('w:')) return { monitor: 0, window: value.slice(2) };
+  return { monitor: Number(value.replace(/^m:/, '')) || 0, window: null };
+}
+
 async function startNativeStream() {
   const q = DESKTOP_QUALITY[$('#opt-quality').value] || DESKTOP_QUALITY['1080p60'];
+  const source = selectedSource();
   state.busy = true;
   renderPresence();
   try {
@@ -1539,7 +1612,10 @@ async function startNativeStream() {
       args: {
         url,
         token,
-        monitor: Number($('#opt-monitor').value || 0),
+        monitor: source.monitor,
+        window: source.window,
+        stretch: $('#opt-stretch').checked,
+        audio_mode: source.window ? $('#opt-audio-mode').value : 'system',
         width: q.width,
         height: q.height,
         fps: q.fps,

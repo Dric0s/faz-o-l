@@ -269,3 +269,5 @@ textarea:focus { outline: 2px solid var(--blurple); }
 .mention-box button.active, .mention-box button:hover { background: var(--bg-3); }
 .mention-box img { width: 22px; height: 22px; border-radius: 50%; }
 .mention-box .muted { font-size: 12px; }
+.row.nowrap { flex-wrap: nowrap; align-items: center; }
+.row.nowrap select { flex: 1; min-width: 0; }

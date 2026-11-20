@@ -3,6 +3,9 @@
 //! Usa o loopback por processo em modo "excluir": captura tudo o que toca no PC,
 //! menos o Faz o L (e os processos filhos, como o WebView2). Assim quem transmite
 //! pode assistir a outra live no app sem que o som dela volte pra transmissão.
+//!
+//! Com "só o som do jogo", usa o modo "incluir" com o processo da janela escolhida:
+//! sai só o jogo (sem Discord, música etc.).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,22 +21,26 @@ pub const CHANNELS: u32 = 2;
 const SAMPLES_PER_CHANNEL: usize = (SAMPLE_RATE / 100) as usize; // 10 ms
 const BYTES_PER_FRAME: usize = SAMPLES_PER_CHANNEL * CHANNELS as usize * 4; // f32
 
-pub fn spawn(source: NativeAudioSource, stop: Arc<AtomicBool>) -> JoinHandle<()> {
+pub fn spawn(source: NativeAudioSource, stop: Arc<AtomicBool>, only_process: Option<u32>) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("fazol-audio".into())
         .spawn(move || {
-            if let Err(err) = run(source, stop) {
+            if let Err(err) = run(source, stop, only_process) {
                 log::error!("captura de áudio falhou: {err}");
             }
         })
         .expect("não consegui criar a thread de áudio")
 }
 
-fn run(source: NativeAudioSource, stop: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+fn run(source: NativeAudioSource, stop: Arc<AtomicBool>, only_process: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
     wasapi::initialize_mta().ok()?;
 
-    // include_tree = false -> modo EXCLUIR o nosso processo (e filhos)
-    let mut client = AudioClient::new_application_loopback_client(std::process::id(), false)?;
+    // include_tree = true -> só o processo do jogo (e filhos)
+    // include_tree = false -> tudo, menos o nosso processo (e filhos)
+    let mut client = match only_process {
+        Some(pid) => AudioClient::new_application_loopback_client(pid, true)?,
+        None => AudioClient::new_application_loopback_client(std::process::id(), false)?,
+    };
     let format = WaveFormat::new(32, 32, SampleType::Float, SAMPLE_RATE as usize, CHANNELS as usize, None);
     let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 };
     client.initialize_client(&format, Direction::Capture, mode, None)?;

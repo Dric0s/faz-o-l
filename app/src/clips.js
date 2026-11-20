@@ -122,6 +122,12 @@ export async function clipsRouter() {
     for (const { id } of sql('SELECT id FROM clips WHERE published = 0 AND created_at < ?').all(Date.now() - PUBLISH_FALLBACK_MS)) publish(id);
   }, 30_000).unref();
 
+  // Live começou: o gravador entra na sala na hora (sem esperar a varredura dele)
+  liveEvents.on('stream:start', ({ channel }) => {
+    fetch(`${RECORDER_URL}/join?room=${encodeURIComponent(roomName(channel))}`, { method: 'POST', signal: AbortSignal.timeout(3000) })
+      .catch(() => {});
+  });
+
   const router = express.Router();
   const member = [requireUser, requireMember];
 
@@ -159,6 +165,9 @@ export async function clipsRouter() {
         signal: AbortSignal.timeout(60_000),
       });
       made = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        return res.status(409).json({ error: 'A live acabou de começar e ainda não tem nada gravado. Espere uns segundos e clipe de novo.' });
+      }
       if (!r.ok) throw new Error(made.error || `recorder respondeu ${r.status}`);
     } catch (err) {
       console.error('[clips] falha ao clipar:', err.message);

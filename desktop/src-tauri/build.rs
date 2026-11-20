@@ -8,6 +8,7 @@ fn main() {
             "get_server",
             "set_server",
             "list_monitors",
+            "list_windows",
             "gpu_encoder",
             "start_stream",
             "stop_stream",

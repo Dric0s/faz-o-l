@@ -46,6 +46,7 @@ fn allow_remote(app: &AppHandle, origin: &Url) {
         .window("main")
         .permission("core:event:default")
         .permission("allow-list-monitors")
+        .permission("allow-list-windows")
         .permission("allow-gpu-encoder")
         .permission("allow-app-version")
         .permission("allow-update-status")
