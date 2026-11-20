@@ -2,7 +2,8 @@
 //
 // O recorder fica gravando cada live em pedaços de ~4 s (sem recodificar) e, quando
 // alguém clipa, junta os pedaços num MP4/WebM dentro do volume compartilhado.
-// Aqui ficam os metadados, as permissões e a limpeza: clipe não salvo some em 24 h.
+// Aqui ficam os metadados (título, descrição, marcações @), permissões, perfis e a
+// limpeza: clipe não salvo some em 24 h.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -10,36 +11,47 @@ import path from 'node:path';
 import express from 'express';
 import { config } from './config.js';
 import { requireUser } from './auth.js';
-import { getRoomState, liveEvents } from './livekit.js';
+import { getChannel, getUserByUsername, memberRole, requireMember, roomName } from './channels.js';
+import { sql, transaction } from './db.js';
+import { getRoomState, liveEvents, ownerOf } from './livekit.js';
 
 const CLIPS_DIR = process.env.CLIPS_DIR || '/data/clips';
-const DB_FILE = path.join(CLIPS_DIR, 'clips.json');
 const RECORDER_URL = process.env.RECORDER_URL || 'http://recorder:8090';
 const UNSAVED_TTL_MS = 24 * 60 * 60 * 1000;
+const PUBLISH_FALLBACK_MS = 3 * 60 * 1000; // sem título em 3 min: posta no Discord assim mesmo
 const ALLOWED_SECONDS = [30, 60, 120];
+const TITLE_MAX = 100;
+const DESCRIPTION_MAX = 500;
 
-let clips = [];
-let writing = Promise.resolve();
+// @ do Discord: letras, números, "_" e "." (2 a 32)
+const MENTION_RE = /@([a-z0-9_.]{2,32})/gi;
 
-async function load() {
-  try {
-    clips = JSON.parse(await fs.readFile(DB_FILE, 'utf8'));
-  } catch {
-    clips = [];
+const getClip = (id) => sql('SELECT * FROM clips WHERE id = ?').get(id);
+
+/** Usuários marcados (@username) que são membros do canal do clipe. */
+function resolveMentions(channelId, ...texts) {
+  const found = new Map();
+  for (const text of texts) {
+    for (const [, raw] of String(text || '').matchAll(MENTION_RE)) {
+      const username = raw.replace(/\.+$/, '').toLowerCase();
+      if (found.has(username)) continue;
+      const user = getUserByUsername(username);
+      if (user && memberRole(channelId, user.id)) found.set(username, user);
+    }
   }
+  return [...found.values()];
 }
 
-// Escrita atômica e em fila (evita corromper o arquivo com duas gravações ao mesmo tempo)
-function persist() {
-  writing = writing.then(async () => {
-    const tmp = `${DB_FILE}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(clips, null, 1));
-    await fs.rename(tmp, DB_FILE);
-  });
-  return writing;
+const mentionsOf = (clipId) =>
+  sql(`SELECT u.id, u.username, u.name, u.avatar FROM clip_mentions m JOIN users u ON u.id = m.user_id WHERE m.clip_id = ?`).all(clipId);
+
+function usernameOf(userId) {
+  return sql('SELECT username FROM users WHERE id = ?').get(userId)?.username || null;
 }
 
-function publicClip(clip, user) {
+function publicClip(clip, user, channel = null) {
+  const ch = channel || getChannel(clip.channel_id);
+  const owner = !!user && ch && memberRole(ch.id, user.id) === 'owner';
   return {
     id: clip.id,
     url: `/clips/${clip.file}`,
@@ -48,40 +60,70 @@ function publicClip(clip, user) {
     size: clip.size,
     seconds: clip.seconds,
     duration: clip.duration,
-    streamer: clip.streamerName,
-    creator: clip.creatorName,
-    createdAt: clip.createdAt,
-    saved: clip.saved,
-    expiresAt: clip.saved ? null : clip.createdAt + UNSAVED_TTL_MS,
-    mine: !!user && clip.creatorId === user.id,
+    title: clip.title,
+    description: clip.description,
+    streamer: { id: clip.streamer_id, name: clip.streamer_name, username: usernameOf(clip.streamer_id) },
+    creator: { id: clip.creator_id, name: clip.creator_name, username: usernameOf(clip.creator_id) },
+    mentions: mentionsOf(clip.id),
+    channel: ch ? { id: ch.id, name: ch.name } : null,
+    createdAt: clip.created_at,
+    saved: !!clip.saved,
+    expiresAt: clip.saved ? null : clip.created_at + UNSAVED_TTL_MS,
+    mine: !!user && clip.creator_id === user.id,
+    canDelete: !!user && (clip.creator_id === user.id || owner),
   };
 }
 
 async function removeClip(clip) {
   await fs.rm(path.join(CLIPS_DIR, clip.file), { force: true });
-  clips = clips.filter((c) => c.id !== clip.id);
+  sql('DELETE FROM clips WHERE id = ?').run(clip.id);
 }
 
 async function cleanup() {
-  const now = Date.now();
-  const expired = clips.filter((c) => !c.saved && now - c.createdAt > UNSAVED_TTL_MS);
+  const expired = sql('SELECT * FROM clips WHERE saved = 0 AND created_at < ?').all(Date.now() - UNSAVED_TTL_MS);
   for (const clip of expired) await removeClip(clip);
-  if (expired.length) {
-    await persist();
-    console.log(`[clips] ${expired.length} clipe(s) não salvo(s) apagado(s) (mais de 24 h)`);
-  }
+  if (expired.length) console.log(`[clips] ${expired.length} clipe(s) não salvo(s) apagado(s) (mais de 24 h)`);
+}
+
+/** Posta no Discord uma vez só (quando quem clipou confirma o título, ou depois de 3 min). */
+function publish(clipId) {
+  const res = sql('UPDATE clips SET published = 1 WHERE id = ? AND published = 0').run(clipId);
+  if (!res.changes) return;
+  const clip = getClip(clipId);
+  const channel = getChannel(clip.channel_id);
+  if (channel) liveEvents.emit('clip:published', { channel, clip: { ...clip, mentions: mentionsOf(clip.id) } });
+}
+
+function setDetails(clip, { title, description }) {
+  const cleanTitle = String(title ?? clip.title).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, TITLE_MAX);
+  const cleanDescription = String(description ?? clip.description).replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim().slice(0, DESCRIPTION_MAX);
+  const mentioned = resolveMentions(clip.channel_id, cleanTitle, cleanDescription);
+  transaction(() => {
+    sql('UPDATE clips SET title = ?, description = ? WHERE id = ?').run(cleanTitle, cleanDescription, clip.id);
+    sql('DELETE FROM clip_mentions WHERE clip_id = ?').run(clip.id);
+    for (const user of mentioned) sql('INSERT OR IGNORE INTO clip_mentions (clip_id, user_id) VALUES (?, ?)').run(clip.id, user.id);
+  });
 }
 
 const escapeHtml = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+const lengthLabel = (seconds) => (seconds >= 60 ? `${seconds / 60} min` : `${seconds} s`);
+
+/** Clipes que o usuário pode ver: dos canais em que ele é membro. */
+const VISIBLE = 'c.channel_id IN (SELECT channel_id FROM members WHERE user_id = ?)';
+
 export async function clipsRouter() {
   await fs.mkdir(CLIPS_DIR, { recursive: true });
-  await load();
   await cleanup();
   setInterval(() => cleanup().catch((e) => console.error('[clips] limpeza:', e.message)), 10 * 60 * 1000).unref();
+  // Clipes que ficaram sem confirmar o título (aba fechada etc.)
+  setInterval(() => {
+    for (const { id } of sql('SELECT id FROM clips WHERE published = 0 AND created_at < ?').all(Date.now() - PUBLISH_FALLBACK_MS)) publish(id);
+  }, 30_000).unref();
 
   const router = express.Router();
+  const member = [requireUser, requireMember];
 
   // Arquivos dos clipes: link "não listado" (id aleatório), pra abrir direto no Discord
   router.use(
@@ -93,17 +135,17 @@ export async function clipsRouter() {
     }),
   );
 
-  router.get('/api/clips', requireUser, (req, res) => {
-    const list = [...clips].sort((a, b) => b.createdAt - a.createdAt).map((c) => publicClip(c, req.user));
-    res.json({ clips: list, ttlHours: UNSAVED_TTL_MS / 3600000 });
+  router.get('/api/c/:cid/clips', ...member, (req, res) => {
+    const list = sql('SELECT * FROM clips WHERE channel_id = ? ORDER BY created_at DESC LIMIT 100').all(req.channel.id);
+    res.json({ clips: list.map((c) => publicClip(c, req.user, req.channel)), ttlHours: UNSAVED_TTL_MS / 3600000 });
   });
 
-  router.post('/api/clips', requireUser, express.json(), async (req, res) => {
+  router.post('/api/c/:cid/clips', ...member, express.json(), async (req, res) => {
     const seconds = Number(req.body?.seconds);
     const identity = String(req.body?.streamer || '');
     if (!ALLOWED_SECONDS.includes(seconds)) return res.status(400).json({ error: 'Duração inválida.' });
 
-    const state = await getRoomState();
+    const state = await getRoomState(req.channel);
     const streamer = state.streamers.find((s) => s.identity === identity && s.live);
     if (!streamer) return res.status(404).json({ error: 'Essa live não está no ar.' });
 
@@ -113,7 +155,7 @@ export async function clipsRouter() {
       const r = await fetch(`${RECORDER_URL}/clip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identity, seconds, id }),
+        body: JSON.stringify({ room: roomName(req.channel), identity, seconds, id }),
         signal: AbortSignal.timeout(60_000),
       });
       made = await r.json().catch(() => ({}));
@@ -123,50 +165,75 @@ export async function clipsRouter() {
       return res.status(502).json({ error: 'Não consegui gerar o clipe. Tente de novo em alguns segundos.' });
     }
 
-    const clip = {
-      id,
-      file: made.file,
-      mime: made.mime,
-      size: made.size,
-      duration: made.duration,
-      seconds,
-      streamerIdentity: identity,
-      streamerName: streamer.name,
-      creatorId: req.user.id,
-      creatorName: req.user.name,
-      createdAt: Date.now(),
-      saved: false,
-    };
-    clips.push(clip);
-    await persist();
-    liveEvents.emit('clip:created', clip);
-    res.json(publicClip(clip, req.user));
+    sql(`INSERT INTO clips (id, channel_id, file, mime, size, duration, seconds, streamer_id, streamer_name,
+           creator_id, creator_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, req.channel.id, made.file, made.mime, made.size || 0, made.duration || 0, seconds,
+        ownerOf(identity), streamer.name, req.user.id, req.user.name, Date.now());
+    res.json(publicClip(getClip(id), req.user, req.channel));
   });
 
-  router.post('/api/clips/:id/save', requireUser, async (req, res) => {
-    const clip = clips.find((c) => c.id === req.params.id);
+  // Título, descrição (com @marcações) e/ou salvar. "publish": posta no Discord agora.
+  router.patch('/api/clips/:id', requireUser, express.json(), (req, res) => {
+    const clip = getClip(req.params.id);
     if (!clip) return res.status(404).json({ error: 'Clipe não encontrado (talvez já tenha expirado).' });
-    if (clip.creatorId !== req.user.id) return res.status(403).json({ error: 'Só quem criou pode salvar.' });
-    clip.saved = req.body?.saved !== false;
-    await persist();
-    res.json(publicClip(clip, req.user));
+    if (clip.creator_id !== req.user.id) return res.status(403).json({ error: 'Só quem clipou pode editar.' });
+    const body = req.body || {};
+    if ('title' in body || 'description' in body) setDetails(clip, body);
+    if ('saved' in body) sql('UPDATE clips SET saved = ? WHERE id = ?').run(body.saved ? 1 : 0, clip.id);
+    if (body.publish) publish(clip.id);
+    res.json(publicClip(getClip(clip.id), req.user));
   });
 
+  // Compatibilidade com a versão anterior do site
+  router.post('/api/clips/:id/save', requireUser, express.json(), (req, res) => {
+    const clip = getClip(req.params.id);
+    if (!clip) return res.status(404).json({ error: 'Clipe não encontrado (talvez já tenha expirado).' });
+    if (clip.creator_id !== req.user.id) return res.status(403).json({ error: 'Só quem criou pode salvar.' });
+    sql('UPDATE clips SET saved = ? WHERE id = ?').run(req.body?.saved === false ? 0 : 1, clip.id);
+    res.json(publicClip(getClip(clip.id), req.user));
+  });
+
+  // Quem clipou ou o dono do canal pode excluir
   router.delete('/api/clips/:id', requireUser, async (req, res) => {
-    const clip = clips.find((c) => c.id === req.params.id);
+    const clip = getClip(req.params.id);
     if (!clip) return res.status(404).json({ error: 'Clipe não encontrado.' });
-    if (clip.creatorId !== req.user.id) return res.status(403).json({ error: 'Só quem criou pode excluir.' });
+    const owner = memberRole(clip.channel_id, req.user.id) === 'owner';
+    if (clip.creator_id !== req.user.id && !owner) return res.status(403).json({ error: 'Só quem clipou ou o dono do canal pode excluir.' });
     await removeClip(clip);
-    await persist();
     res.json({ ok: true });
+  });
+
+  // Perfil: clipes das lives da pessoa + clipes em que ela foi marcada
+  // (só dos canais que quem está vendo também participa)
+  router.get('/api/users/:username', requireUser, (req, res) => {
+    const user = getUserByUsername(req.params.username);
+    if (!user) return res.status(404).json({ error: 'Ninguém com esse @ entrou no Faz o L ainda.' });
+    const viewer = req.user.id;
+    const streamed = sql(`SELECT c.* FROM clips c WHERE c.streamer_id = ? AND ${VISIBLE} ORDER BY c.created_at DESC LIMIT 100`)
+      .all(user.id, viewer);
+    const tagged = sql(`SELECT c.* FROM clips c JOIN clip_mentions m ON m.clip_id = c.id
+                        WHERE m.user_id = ? AND ${VISIBLE} ORDER BY c.created_at DESC LIMIT 100`).all(user.id, viewer);
+    const shared = sql(`SELECT ch.id, ch.name, ch.icon FROM channels ch
+                        JOIN members a ON a.channel_id = ch.id AND a.user_id = ?
+                        JOIN members b ON b.channel_id = ch.id AND b.user_id = ?`).all(user.id, viewer);
+    res.json({
+      user,
+      me: user.id === viewer,
+      channels: shared,
+      streamed: streamed.map((c) => publicClip(c, req.user)),
+      tagged: tagged.map((c) => publicClip(c, req.user)),
+    });
   });
 
   // Página do clipe, com metatags pro Discord mostrar o vídeo embutido
   router.get('/clip/:id', (req, res) => {
-    const clip = clips.find((c) => c.id === req.params.id);
+    const clip = getClip(req.params.id);
     if (!clip) return res.status(404).send('Clipe não encontrado (clipes não salvos expiram em 24 h).');
     const video = `${config.publicUrl}/clips/${clip.file}`;
-    const title = `${clip.streamerName} • clipe de ${clip.seconds >= 60 ? `${clip.seconds / 60} min` : `${clip.seconds} s`}`;
+    const fallback = `${clip.streamer_name} • clipe de ${lengthLabel(clip.seconds)}`;
+    const title = clip.title || fallback;
+    const byline = `${clip.title ? `Live de ${clip.streamer_name} • ` : ''}clipado por ${clip.creator_name}`;
+    const description = clip.description ? `${clip.description}\n\n${byline}` : byline;
     res.setHeader('Cache-Control', 'no-cache');
     res.send(`<!doctype html>
 <html lang="pt-BR"><head>
@@ -174,7 +241,7 @@ export async function clipsRouter() {
 <title>${escapeHtml(title)} — Faz o L</title>
 <meta property="og:site_name" content="Faz o L">
 <meta property="og:title" content="${escapeHtml(title)}">
-<meta property="og:description" content="Clipado por ${escapeHtml(clip.creatorName)}">
+<meta property="og:description" content="${escapeHtml(description)}">
 <meta property="og:type" content="video.other">
 <meta property="og:video" content="${escapeHtml(video)}">
 <meta property="og:video:secure_url" content="${escapeHtml(video)}">
@@ -182,11 +249,12 @@ export async function clipsRouter() {
 <meta property="og:video:width" content="1280"><meta property="og:video:height" content="720">
 <meta name="theme-color" content="#ed4245">
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111214;color:#f2f3f5;font:15px system-ui,"Segoe UI",sans-serif;padding:16px;box-sizing:border-box}
-main{width:min(1100px,100%)}video{width:100%;border-radius:14px;background:#000}h1{font-size:20px;margin:12px 0 4px}p{margin:0;color:#949ba4}a{color:#8ea1e1}</style>
+main{width:min(1100px,100%)}video{width:100%;border-radius:14px;background:#000}h1{font-size:20px;margin:12px 0 4px}p{margin:0 0 6px;color:#949ba4;white-space:pre-wrap}a{color:#8ea1e1}</style>
 </head><body><main>
 <video src="${escapeHtml(video)}" controls autoplay playsinline></video>
 <h1>${escapeHtml(title)}</h1>
-<p>Clipado por ${escapeHtml(clip.creatorName)} • <a href="${escapeHtml(video)}" download>baixar</a> • <a href="/">abrir o Faz o L</a></p>
+${clip.description ? `<p>${escapeHtml(clip.description)}</p>` : ''}
+<p>${escapeHtml(byline)} • <a href="${escapeHtml(video)}" download>baixar</a> • <a href="/c/${escapeHtml(clip.channel_id)}">abrir o Faz o L</a></p>
 </main></body></html>`);
   });
 

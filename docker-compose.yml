@@ -49,10 +49,12 @@ services:
       PUBLIC_URL: https://${DOMAIN:?Defina DOMAIN no .env}
       RECORDER_URL: http://fazol-recorder:8090
       CLIPS_DIR: /data/clips
+      DB_FILE: /data/app/fazol.db
     volumes:
       - clips:/data/clips
+      - appdata:/data/app
 
-  # Gravador de clipes: guarda os últimos ~3 min de cada live (sem recodificar)
+  # Gravador de clipes: entra nas salas com live e guarda os últimos ~3 min de cada uma (sem recodificar)
   # e gera o clipe quando alguém clica em "Clipar"
   recorder:
     build: ./recorder
@@ -64,7 +66,6 @@ services:
       LIVEKIT_WS_URL: ws://fazol-livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
-      ROOM_NAME: ${ROOM_NAME:-faz-o-l}
       CLIPS_DIR: /data/clips
       BUFFER_DIR: /data/buffer
     volumes:
@@ -75,4 +76,5 @@ services:
 
 volumes:
   clips:
+  appdata:
   recorder_buffer:

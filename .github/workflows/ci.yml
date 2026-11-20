@@ -18,6 +18,19 @@ jobs:
       - name: Checar sintaxe
         working-directory: app
         run: npm run check
+      - name: Teste de fumaça (canais, convites, clipes, perfis)
+        working-directory: app
+        env:
+          DB_FILE: /tmp/fazol-test.db
+          CLIPS_DIR: /tmp/fazol-clips
+          SESSION_SECRET: teste
+          LIVEKIT_API_KEY: teste
+          LIVEKIT_API_SECRET: teste
+          LIVEKIT_HOST: http://127.0.0.1:1
+          DISCORD_CLIENT_ID: "1"
+          DISCORD_CLIENT_SECRET: "2"
+          CREATOR_DISCORD_IDS: "11111"
+        run: node smoke.test.mjs
       - name: Checar install.sh
         run: bash -n install.sh
       - name: Validar docker-compose (Caddy e Traefik)

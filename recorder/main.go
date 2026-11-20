@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -41,15 +42,19 @@ var (
 	livekitURL = env("LIVEKIT_WS_URL", "ws://fazol-livekit:7880")
 	apiKey     = os.Getenv("LIVEKIT_API_KEY")
 	apiSecret  = os.Getenv("LIVEKIT_API_SECRET")
-	roomName   = env("ROOM_NAME", "faz-o-l")
 	bufferDir  = env("BUFFER_DIR", "/data/buffer")
 	clipsDir   = env("CLIPS_DIR", "/data/clips")
 	listenAddr = env("LISTEN", ":8090")
 
 	nextPort atomic.Int32
 	mu       sync.Mutex
-	records  = map[string]*recording{} // identidade -> gravação
+	records  = map[string]*recording{} // "<sala>/<identidade>" -> gravação
+
+	roomsMu sync.Mutex
+	rooms   = map[string]*lksdk.Room{} // salas em que o gravador está
 )
+
+func recordKey(room, identity string) string { return room + "/" + identity }
 
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -93,15 +98,16 @@ type recording struct {
 
 var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
-func getRecording(identity string) *recording {
+func getRecording(room, identity string) *recording {
+	key := recordKey(room, identity)
 	mu.Lock()
 	defer mu.Unlock()
-	rec := records[identity]
+	rec := records[key]
 	if rec == nil {
-		dir := filepath.Join(bufferDir, unsafeChars.ReplaceAllString(identity, "_"))
+		dir := filepath.Join(bufferDir, unsafeChars.ReplaceAllString(room+"__"+identity, "_"))
 		_ = os.MkdirAll(dir, 0o755)
-		rec = &recording{identity: identity, dir: dir, seen: map[string]bool{}}
-		records[identity] = rec
+		rec = &recording{identity: key, dir: dir, seen: map[string]bool{}}
+		records[key] = rec
 	}
 	return rec
 }
@@ -345,6 +351,7 @@ func janitor() {
 // ---------------------------------------------------------------------------
 
 type clipRequest struct {
+	Room     string `json:"room"`
 	Identity string `json:"identity"`
 	Seconds  int    `json:"seconds"`
 	ID       string `json:"id"`
@@ -354,7 +361,7 @@ var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{6,32}$`)
 
 func makeClip(req clipRequest) (map[string]any, error) {
 	mu.Lock()
-	rec := records[req.Identity]
+	rec := records[recordKey(req.Room, req.Identity)]
 	mu.Unlock()
 	if rec == nil {
 		return nil, fmt.Errorf("essa live não está sendo gravada")
@@ -449,8 +456,8 @@ func isScreen(pub *lksdk.RemoteTrackPublication) bool {
 	return s == livekit.TrackSource_SCREEN_SHARE || s == livekit.TrackSource_SCREEN_SHARE_AUDIO
 }
 
-func token() (string, error) {
-	grant := &auth.VideoGrant{RoomJoin: true, Room: roomName, Hidden: true}
+func token(room string) (string, error) {
+	grant := &auth.VideoGrant{RoomJoin: true, Room: room, Hidden: true}
 	grant.SetCanPublish(false)
 	grant.SetCanSubscribe(true)
 	return auth.NewAccessToken(apiKey, apiSecret).
@@ -461,8 +468,8 @@ func token() (string, error) {
 		ToJWT()
 }
 
-func connect() {
-	disconnected := make(chan struct{}, 1)
+// Entra numa sala (um canal) e passa a gravar as lives dela.
+func joinRoom(name string) {
 	callback := &lksdk.RoomCallback{
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnTrackPublished: func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
@@ -477,45 +484,97 @@ func connect() {
 				if track.Kind() == webrtc.RTPCodecTypeVideo {
 					_ = pub.SetVideoQuality(livekit.VideoQuality_HIGH)
 				}
-				getRecording(rp.Identity()).addTrack(track, pub, rp)
+				getRecording(name, rp.Identity()).addTrack(track, pub, rp)
 			},
 			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-				getRecording(rp.Identity()).removeTrack(track)
+				getRecording(name, rp.Identity()).removeTrack(track)
 			},
 		},
 		OnDisconnected: func() {
-			select {
-			case disconnected <- struct{}{}:
-			default:
-			}
+			roomsMu.Lock()
+			delete(rooms, name)
+			roomsMu.Unlock()
+			log.Printf("[%s] saiu da sala", name)
 		},
 	}
 
-	for {
-		tok, err := token()
-		if err != nil {
-			log.Fatalf("token: %v", err)
+	tok, err := token(name)
+	if err != nil {
+		log.Printf("[%s] token: %v", name, err)
+		return
+	}
+	room, err := lksdk.ConnectToRoomWithToken(livekitURL, tok, callback, lksdk.WithAutoSubscribe(false))
+	if err != nil {
+		log.Printf("[%s] não consegui entrar: %v", name, err)
+		return
+	}
+	roomsMu.Lock()
+	rooms[name] = room
+	roomsMu.Unlock()
+	log.Printf("[%s] na sala, gravando as lives", name)
+
+	// Lives que já estavam no ar quando o gravador entrou
+	for _, rp := range room.GetRemoteParticipants() {
+		for _, p := range rp.TrackPublications() {
+			if pub, ok := p.(*lksdk.RemoteTrackPublication); ok && isScreen(pub) {
+				_ = pub.SetSubscribed(true)
+			}
 		}
-		room, err := lksdk.ConnectToRoomWithToken(livekitURL, tok, callback, lksdk.WithAutoSubscribe(false))
+	}
+}
+
+// Fica de olho nas salas do LiveKit: entra nas que têm alguém transmitindo e sai
+// das que ficaram sem live (os pedaços gravados continuam valendo pra clipar).
+func watchRooms() {
+	httpURL := strings.Replace(strings.Replace(livekitURL, "wss://", "https://", 1), "ws://", "http://", 1)
+	client := lksdk.NewRoomServiceClient(httpURL, apiKey, apiSecret)
+	idleSince := map[string]time.Time{}
+	joining := map[string]bool{}
+
+	for range time.Tick(2 * time.Second) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		res, err := client.ListRooms(ctx, &livekit.ListRoomsRequest{})
+		cancel()
 		if err != nil {
-			log.Printf("não consegui entrar na sala (%v), tentando de novo em 5 s", err)
-			time.Sleep(5 * time.Second)
+			log.Printf("listar salas: %v", err)
 			continue
 		}
-		log.Printf("na sala %q, aguardando lives", roomName)
-
-		// Lives que já estavam no ar quando o gravador entrou
-		for _, rp := range room.GetRemoteParticipants() {
-			for _, p := range rp.TrackPublications() {
-				if pub, ok := p.(*lksdk.RemoteTrackPublication); ok && isScreen(pub) {
-					_ = pub.SetSubscribed(true)
-				}
+		live := map[string]bool{}
+		for _, r := range res.Rooms {
+			if r.NumPublishers > 0 {
+				live[r.Name] = true
 			}
 		}
 
-		<-disconnected
-		log.Printf("desconectado da sala, reconectando em 3 s")
-		time.Sleep(3 * time.Second)
+		roomsMu.Lock()
+		current := make(map[string]*lksdk.Room, len(rooms))
+		for name, room := range rooms {
+			current[name] = room
+		}
+		for name := range live {
+			delete(idleSince, name)
+			if current[name] == nil && !joining[name] {
+				joining[name] = true
+				go func(name string) {
+					joinRoom(name)
+					roomsMu.Lock()
+					delete(joining, name)
+					roomsMu.Unlock()
+				}(name)
+			}
+		}
+		roomsMu.Unlock()
+		for name, room := range current {
+			if live[name] {
+				continue
+			}
+			if idleSince[name].IsZero() {
+				idleSince[name] = time.Now()
+			} else if time.Since(idleSince[name]) > 30*time.Second {
+				delete(idleSince, name)
+				room.Disconnect()
+			}
+		}
 	}
 }
 
@@ -533,5 +592,5 @@ func main() {
 	}
 	go janitor()
 	go serveHTTP()
-	connect()
+	watchRooms()
 }

@@ -15,7 +15,7 @@
     <div class="card hero">
       <div class="logo big"><span>L</span></div>
       <h1>Faz o L</h1>
-      <p class="muted">Transmita sua tela pra galera com quase zero de delay.</p>
+      <p class="muted" id="login-sub">Transmita sua tela pra galera com quase zero de delay.</p>
       <p id="login-error" class="error" hidden></p>
 
       <a id="btn-discord" class="btn btn-discord" href="/auth/login" hidden>
@@ -30,27 +30,84 @@
     </div>
   </section>
 
+  <!-- Meus canais -->
+  <section id="view-home" class="view center" hidden>
+    <div class="card hero wide">
+      <div class="logo big"><span>L</span></div>
+      <h1>Faz o L</h1>
+      <a class="me-chip link" id="home-me" href="#"><img id="home-avatar" alt="" hidden /><span id="home-name"></span></a>
+      <p id="home-error" class="error" hidden></p>
+      <h3 class="section-title">Seus canais</h3>
+      <ul id="channel-list" class="channel-list"></ul>
+      <p id="no-channels" class="muted" hidden>Você ainda não está em nenhum canal. Peça um <b>link de convite</b> pra quem colocou o Faz o L no servidor do Discord.</p>
+      <a id="btn-create" class="btn btn-discord" href="/auth/install" hidden>＋ Criar canal num servidor do Discord</a>
+      <button id="btn-logout-home" class="btn btn-ghost btn-sm">Sair da conta</button>
+    </div>
+  </section>
+
+  <!-- Convite -->
+  <section id="view-invite" class="view center" hidden>
+    <div class="card hero">
+      <img id="invite-icon" class="guild-icon big" alt="" hidden />
+      <p class="muted">Você foi convidado para o canal</p>
+      <h1 id="invite-name"></h1>
+      <p id="invite-error" class="error" hidden></p>
+      <button id="btn-accept" class="btn btn-primary btn-lg">Entrar no canal</button>
+      <a class="btn btn-ghost btn-sm" href="/" data-link>Voltar</a>
+    </div>
+  </section>
+
   <!-- Tela antes de entrar na sala (o clique libera o som) -->
   <section id="view-join" class="view center" hidden>
     <div class="card hero">
-      <div class="logo big"><span>L</span></div>
-      <h1>Faz o L</h1>
+      <img id="join-icon" class="guild-icon big" alt="" hidden />
+      <div id="join-logo" class="logo big"><span>L</span></div>
+      <h1 id="join-channel">Faz o L</h1>
       <div class="me-chip"><img id="join-avatar" alt="" hidden /><span id="join-name"></span></div>
       <div id="join-status" class="join-status muted">Carregando…</div>
       <button id="btn-join" class="btn btn-primary btn-lg">Entrar na sala</button>
-      <button id="btn-logout-join" class="btn btn-ghost btn-sm">Sair da conta</button>
+      <a class="btn btn-ghost btn-sm" href="/" data-link>Meus canais</a>
+    </div>
+  </section>
+
+  <!-- Perfil -->
+  <section id="view-profile" class="view page" hidden>
+    <header class="topbar">
+      <a class="btn btn-ghost btn-sm" id="profile-back" href="/" data-link>← Voltar</a>
+      <div class="brand"><div class="logo"><span>L</span></div><strong>Faz o L</strong></div>
+    </header>
+    <div class="page-body">
+      <div class="profile-head">
+        <img id="profile-avatar" class="profile-avatar" alt="" />
+        <div>
+          <h1 id="profile-name"></h1>
+          <div id="profile-username" class="muted"></div>
+          <div id="profile-channels" class="hint"></div>
+        </div>
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-tab="streamed">Clipes das lives <span id="count-streamed" class="muted"></span></button>
+        <button class="tab" data-tab="tagged">Marcado em <span id="count-tagged" class="muted"></span></button>
+      </div>
+      <ul id="profile-clips" class="clips grid"></ul>
     </div>
   </section>
 
   <!-- Sala -->
   <section id="view-room" class="view room" hidden>
     <header class="topbar">
-      <div class="brand"><div class="logo"><span>L</span></div><strong>Faz o L</strong></div>
+      <div class="brand">
+        <img id="room-icon" class="guild-icon" alt="" hidden />
+        <div id="room-logo" class="logo"><span>L</span></div>
+        <strong id="room-name">Faz o L</strong>
+      </div>
       <div class="stats">
         <span class="pill" id="pill-live"><i class="dot"></i><span id="live-count">0/2 ao vivo</span></span>
         <span class="pill" id="pill-viewers">👀 <span id="viewer-count">0/15</span></span>
       </div>
       <div class="topbar-right">
+        <button id="btn-manage" class="btn btn-ghost btn-sm" title="Convites e membros" hidden>⚙ Canal</button>
+        <a id="btn-profile" class="btn btn-ghost btn-sm" title="Meu perfil" href="#">👤</a>
         <button id="btn-sidebar" class="btn btn-ghost btn-sm" title="Pessoas na sala">👥</button>
         <button id="btn-leave" class="btn btn-ghost btn-sm">Sair</button>
       </div>
@@ -117,6 +174,64 @@
     </main>
   </section>
 
+  <!-- Título e descrição do clipe -->
+  <dialog id="dlg-clip" class="dialog">
+    <form id="form-clip" method="dialog" class="stack">
+      <h2>Clipe pronto ✂</h2>
+      <video id="clip-preview" controls playsinline muted></video>
+      <label class="field">Título (opcional)
+        <input id="clip-title" maxlength="100" placeholder="Ex.: que jogada, @fulano!" autocomplete="off" />
+      </label>
+      <label class="field">Descrição (opcional)
+        <textarea id="clip-description" maxlength="500" rows="3" placeholder="Marque a galera com @ pra aparecer no perfil deles"></textarea>
+      </label>
+      <p class="hint">Quem você marcar com <b>@</b> fica com o clipe no perfil. O link vai pro Discord quando você publicar.</p>
+      <div class="row-end">
+        <button type="button" id="clip-skip" class="btn btn-ghost">Pular</button>
+        <button type="submit" class="btn btn-primary">Publicar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Gerenciar canal (dono) -->
+  <dialog id="dlg-manage" class="dialog">
+    <div class="stack">
+      <div class="row-between"><h2>Canal <span id="manage-name"></span></h2><button id="manage-close" class="btn btn-ghost btn-sm">✕</button></div>
+
+      <h3 class="section-title">Convites</h3>
+      <p class="hint">Só quem tiver o link entra no canal. Mande pra galera no Discord.</p>
+      <div class="row">
+        <select id="invite-days">
+          <option value="1">Vale 1 dia</option>
+          <option value="7" selected>Vale 7 dias</option>
+          <option value="30">Vale 30 dias</option>
+          <option value="0">Nunca expira</option>
+        </select>
+        <select id="invite-uses">
+          <option value="">Usos ilimitados</option>
+          <option value="1">1 uso</option>
+          <option value="5">5 usos</option>
+          <option value="10">10 usos</option>
+          <option value="25">25 usos</option>
+        </select>
+        <button id="btn-invite" class="btn btn-primary">Criar link</button>
+      </div>
+      <ul id="invite-list" class="list"></ul>
+
+      <h3 class="section-title">Avisos no Discord</h3>
+      <label class="field">Canal dos avisos de live
+        <select id="discord-notify"></select>
+      </label>
+      <label class="field">Canal dos clipes
+        <select id="discord-clips"></select>
+      </label>
+
+      <h3 class="section-title">Membros <span id="members-count" class="muted"></span></h3>
+      <ul id="member-list" class="list"></ul>
+    </div>
+  </dialog>
+
+  <div id="mention-box" class="mention-box" hidden></div>
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="audio-sink" hidden></div>
 

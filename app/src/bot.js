@@ -3,31 +3,41 @@ import {
   ActivityType,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   EmbedBuilder,
   Events,
   GatewayIntentBits,
+  MessageFlags,
+  PermissionFlagsBits,
   SlashCommandBuilder,
 } from 'discord.js';
 import { config } from './config.js';
+import { allChannels, createInvite, discordBridge, getChannelByGuild, memberRole, updateGuildInfo } from './channels.js';
 import { getRoomState, liveEvents } from './livekit.js';
 
 const COLOR_LIVE = 0xed4245;
 const COLOR_IDLE = 0x5865f2;
 const COLOR_ENDED = 0x4f545c;
+// Bot entrou num servidor sem ser pelo botão "Criar canal" do site: sai depois disso
+const UNKNOWN_GUILD_GRACE_MS = 60_000;
 
-function watchButton(label = 'Assistir agora') {
+const channelUrl = (channel) => `${config.publicUrl}/c/${channel.id}`;
+const lengthLabel = (seconds) => (seconds >= 60 ? `${seconds / 60} min` : `${seconds} s`);
+const iconUrl = (guild) => guild.iconURL({ size: 128, extension: 'png' }) || '';
+
+function watchButton(channel, label = 'Assistir agora') {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(label).setURL(config.publicUrl).setEmoji('📺'),
+    new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(label).setURL(channelUrl(channel)).setEmoji('📺'),
   );
 }
 
-async function statusEmbed() {
-  const state = await getRoomState();
+async function statusEmbed(channel) {
+  const state = await getRoomState(channel);
   const live = state.streamers.filter((s) => s.live);
   const embed = new EmbedBuilder()
-    .setTitle('Faz o L')
-    .setURL(config.publicUrl)
+    .setTitle(`Faz o L • ${channel.name}`)
+    .setURL(channelUrl(channel))
     .setColor(live.length ? COLOR_LIVE : COLOR_IDLE);
 
   if (live.length) {
@@ -43,98 +53,143 @@ async function statusEmbed() {
 }
 
 export async function startBot() {
-  const { botToken, guildId, notifyChannelId, clipsChannelId } = config.discord;
+  const { botToken, guildId: legacyGuildId } = config.discord;
   if (!botToken) {
     console.log('[bot] DISCORD_BOT_TOKEN não definido — bot desativado.');
     return;
   }
 
   const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-  const notifications = new Map(); // identity -> Message
+  const notifications = new Map(); // "<canal>|<identity>" -> Message
 
   const commands = [
     new SlashCommandBuilder().setName('live').setDescription('Mostra quem está transmitindo e o link para assistir'),
+    new SlashCommandBuilder().setName('convite').setDescription('Cria um link de convite para o canal do Faz o L (só o dono)'),
   ].map((c) => c.toJSON());
+
+  // ---------- ponte para o site ----------
+
+  discordBridge.listTextChannels = async (guildId) => {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return [];
+    const channels = await guild.channels.fetch();
+    const me = guild.members.me;
+    return [...channels.values()]
+      .filter((c) => c && (c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement))
+      .filter((c) => c.permissionsFor(me)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]))
+      .sort((a, b) => a.rawPosition - b.rawPosition)
+      .map((c) => ({ id: c.id, name: c.name }));
+  };
+
+  discordBridge.leaveGuild = async (guildId) => {
+    const guild = client.guilds.cache.get(guildId) || (await client.guilds.fetch(guildId).catch(() => null));
+    if (guild) {
+      await guild.leave();
+      console.log(`[bot] Saiu do servidor ${guild.name} (sem permissão para criar canal)`);
+    }
+  };
+
+  // ---------- presença / comandos ----------
 
   async function updatePresence() {
     if (!client.isReady()) return;
-    const state = await getRoomState();
-    const live = state.streamers.filter((s) => s.live).length;
+    let live = 0;
+    let viewers = 0;
+    for (const channel of allChannels()) {
+      const state = await getRoomState(channel);
+      live += state.streamers.filter((s) => s.live).length;
+      viewers += state.viewers;
+    }
     client.user.setPresence({
       status: live ? 'online' : 'idle',
       activities: [
-        {
-          type: ActivityType.Watching,
-          name: live ? `${live} ao vivo • ${state.viewers} assistindo` : 'ninguém ao vivo • /live',
-        },
+        { type: ActivityType.Watching, name: live ? `${live} ao vivo • ${viewers} assistindo` : 'ninguém ao vivo • /live' },
       ],
     });
   }
 
   async function registerCommands() {
     try {
-      if (guildId) {
-        await client.application.commands.set(commands, guildId);
-      } else {
-        await client.application.commands.set(commands);
-      }
-      console.log('[bot] Comando /live registrado.');
+      await client.application.commands.set(commands);
+      // Comandos da versão antiga (registrados só num servidor) duplicariam os globais
+      if (legacyGuildId) await client.application.commands.set([], legacyGuildId).catch(() => {});
+      console.log('[bot] Comandos /live e /convite registrados.');
     } catch (err) {
-      if (guildId && err.code === 50001) {
-        console.log('[bot] O bot ainda não está no servidor. Convide-o:');
-        console.log(`[bot]   https://discord.com/oauth2/authorize?client_id=${client.application.id}&scope=bot+applications.commands&permissions=19456`);
-      } else {
-        console.error('[bot] Falha ao registrar comandos:', err.message);
-      }
+      console.error('[bot] Falha ao registrar comandos:', err.message);
     }
   }
 
   client.once(Events.ClientReady, async (c) => {
     console.log(`[bot] Conectado como ${c.user.tag}`);
     await registerCommands();
+    for (const guild of c.guilds.cache.values()) {
+      if (getChannelByGuild(guild.id)) updateGuildInfo(guild.id, { name: guild.name, icon: iconUrl(guild) });
+      else console.log(`[bot] Servidor ${guild.name} (${guild.id}) não tem canal do Faz o L`);
+    }
     updatePresence().catch(() => {});
   });
 
-  // Convidado pro servidor depois de ligado: registra o /live na hora, sem reiniciar
   client.on(Events.GuildCreate, (guild) => {
     console.log(`[bot] Entrou no servidor ${guild.name}`);
-    if (!guildId || guild.id === guildId) registerCommands();
+    if (getChannelByGuild(guild.id)) return updateGuildInfo(guild.id, { name: guild.name, icon: iconUrl(guild) });
+    // O canal é criado no retorno do "Criar canal" do site; se não vier, não era pra estar aqui
+    setTimeout(() => {
+      if (!getChannelByGuild(guild.id)) discordBridge.leaveGuild(guild.id).catch(() => {});
+    }, UNKNOWN_GUILD_GRACE_MS);
+  });
+
+  client.on(Events.GuildUpdate, (_old, guild) => {
+    updateGuildInfo(guild.id, { name: guild.name, icon: iconUrl(guild) });
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== 'live') return;
+    if (!interaction.isChatInputCommand()) return;
+    const channel = interaction.guildId && getChannelByGuild(interaction.guildId);
+    if (!channel) {
+      return interaction.reply({ content: 'Este servidor ainda não tem um canal do Faz o L.', flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
     try {
-      await interaction.reply({ embeds: [await statusEmbed()], components: [watchButton()] });
+      if (interaction.commandName === 'live') {
+        await interaction.reply({ embeds: [await statusEmbed(channel)], components: [watchButton(channel)] });
+      } else if (interaction.commandName === 'convite') {
+        if (memberRole(channel.id, `d${interaction.user.id}`) !== 'owner') {
+          return interaction.reply({ content: 'Só quem colocou o bot no servidor pode convidar.', flags: MessageFlags.Ephemeral });
+        }
+        const invite = createInvite(channel.id, `d${interaction.user.id}`, { days: 7 });
+        await interaction.reply({
+          content: `Convite para **${channel.name}** (vale 7 dias):\n${invite.url}`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
     } catch (err) {
-      console.error('[bot] /live:', err.message);
+      console.error(`[bot] /${interaction.commandName}:`, err.message);
     }
   });
 
-  async function textChannel(id, label) {
+  // ---------- avisos ----------
+
+  async function textChannel(id) {
     if (!id || !client.isReady()) return null;
     try {
       const channel = await client.channels.fetch(id);
       return channel?.isTextBased() ? channel : null;
     } catch (err) {
-      console.error(`[bot] Canal de ${label} inválido:`, err.message);
+      console.error('[bot] Canal de texto inválido:', id, err.message);
       return null;
     }
   }
-  const notifyChannel = () => textChannel(notifyChannelId, 'avisos');
 
   /**
    * Nome de exibição no Discord. Se só tivermos o id (identity "d<id>" ou
    * "d<id>:tela"), busca o usuário no servidor: apelido > nome global > username.
    */
-  async function resolveName(identity, name) {
+  async function resolveName(guildId, identity, name) {
     const match = /^d(\d+)(?::tela)?$/.exec(identity || '');
     if (!match || (name && name !== identity && name !== identity.replace(/:tela$/, ''))) return name;
     const userId = match[1];
     try {
-      if (guildId) {
-        const member = await client.guilds.cache.get(guildId)?.members.fetch(userId);
-        if (member) return member.displayName;
-      }
+      const member = guildId ? await client.guilds.cache.get(guildId)?.members.fetch(userId) : null;
+      if (member) return member.displayName;
       const user = await client.users.fetch(userId);
       return user.globalName || user.username;
     } catch {
@@ -142,56 +197,68 @@ export async function startBot() {
     }
   }
 
-  // Cada clipe novo vai pro canal de clipes; o link abre o vídeo embutido no Discord
-  liveEvents.on('clip:created', async (clip) => {
-    const channel = await textChannel(clipsChannelId || notifyChannelId, 'clipes');
-    if (!channel) return;
-    const [streamer, creator] = await Promise.all([
-      resolveName(clip.streamerIdentity, clip.streamerName),
-      resolveName(clip.creatorId, clip.creatorName),
-    ]);
-    const length = clip.seconds >= 60 ? `${clip.seconds / 60} min` : `${clip.seconds} s`;
-    const who = creator === streamer ? `**${creator}** clipou a própria live` : `**${creator}** clipou a live de **${streamer}**`;
-    try {
-      await channel.send({
-        content: `✂️ ${who} (${length})\n${config.publicUrl}/clip/${clip.id}`,
-        allowedMentions: { parse: [] },
-      });
-    } catch (err) {
-      console.error('[bot] Falha ao postar clipe:', err.message);
-    }
-  });
-
-  liveEvents.on('stream:start', async ({ identity, name: rawName }) => {
+  liveEvents.on('stream:start', async ({ channel, identity, name: rawName }) => {
     updatePresence().catch(() => {});
-    const name = await resolveName(identity, rawName);
-    const channel = await notifyChannel();
-    if (!channel) return;
+    const target = await textChannel(channel.notify_channel_id);
+    if (!target) return;
+    const name = await resolveName(channel.guild_id, identity, rawName);
     const embed = new EmbedBuilder()
       .setColor(COLOR_LIVE)
       .setTitle(`🔴 ${name} está ao vivo!`)
-      .setURL(config.publicUrl)
+      .setURL(channelUrl(channel))
       .setDescription('Clique no botão para assistir com quase zero de delay.')
       .setTimestamp();
     try {
-      const msg = await channel.send({ embeds: [embed], components: [watchButton()] });
-      notifications.set(identity, msg);
+      const msg = await target.send({ embeds: [embed], components: [watchButton(channel)] });
+      notifications.set(`${channel.id}|${identity}`, msg);
     } catch (err) {
       console.error('[bot] Falha ao enviar aviso:', err.message);
     }
   });
 
-  liveEvents.on('stream:end', async ({ identity, name: rawName }) => {
+  liveEvents.on('stream:end', async ({ channel, identity, name: rawName }) => {
     updatePresence().catch(() => {});
-    const msg = notifications.get(identity);
+    const k = `${channel.id}|${identity}`;
+    const msg = notifications.get(k);
     if (!msg) return;
-    notifications.delete(identity);
-    const name = await resolveName(identity, rawName);
-    const embed = new EmbedBuilder()
-      .setColor(COLOR_ENDED)
-      .setTitle(`${name} encerrou a transmissão`)
-      .setTimestamp();
+    notifications.delete(k);
+    const name = await resolveName(channel.guild_id, identity, rawName);
+    const embed = new EmbedBuilder().setColor(COLOR_ENDED).setTitle(`${name} encerrou a transmissão`).setTimestamp();
     msg.edit({ embeds: [embed], components: [] }).catch(() => {});
+  });
+
+  // Cada clipe vai pro canal de clipes (ou de avisos); o link abre o vídeo embutido no Discord.
+  // As pessoas marcadas com @ no título/descrição recebem a menção.
+  liveEvents.on('clip:published', async ({ channel, clip }) => {
+    const target = await textChannel(channel.clips_channel_id || channel.notify_channel_id);
+    if (!target) return;
+    const [streamer, creator] = await Promise.all([
+      resolveName(channel.guild_id, clip.streamer_id, clip.streamer_name),
+      resolveName(channel.guild_id, clip.creator_id, clip.creator_name),
+    ]);
+    const discordIds = new Map(
+      clip.mentions.filter((u) => u.id.startsWith('d') && u.username).map((u) => [u.username.toLowerCase(), u.id.slice(1)]),
+    );
+    const withMentions = (text) =>
+      text.replace(/@([a-z0-9_.]{2,32})/gi, (all, raw) => {
+        const id = discordIds.get(raw.replace(/\.+$/, '').toLowerCase());
+        return id ? `<@${id}>${raw.match(/\.+$/)?.[0] || ''}` : all;
+      });
+
+    const who = creator === streamer ? `**${creator}** clipou a própria live` : `**${creator}** clipou a live de **${streamer}**`;
+    const lines = [];
+    if (clip.title) lines.push(`✂️ **${withMentions(clip.title)}**`, `${who} (${lengthLabel(clip.seconds)})`);
+    else lines.push(`✂️ ${who} (${lengthLabel(clip.seconds)})`);
+    if (clip.description) lines.push(withMentions(clip.description));
+    lines.push(`${config.publicUrl}/clip/${clip.id}`);
+    try {
+      await target.send({
+        content: lines.join('\n').slice(0, 2000),
+        allowedMentions: { users: [...discordIds.values()] },
+      });
+    } catch (err) {
+      console.error('[bot] Falha ao postar clipe:', err.message);
+    }
   });
 
   let presenceTimer;

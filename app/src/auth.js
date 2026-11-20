@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import { config } from './config.js';
+import { canCreateChannels, createChannel, discordBridge, getChannelByGuild, upsertUser } from './channels.js';
 
 const SESSION_COOKIE = 'fol_session';
 const STATE_COOKIE = 'fol_state';
@@ -54,8 +55,10 @@ function setSession(res, user) {
 /** Middleware: popula req.user a partir do cookie. */
 export function sessionMiddleware(req, _res, next) {
   req.cookies = parseCookies(req.headers.cookie);
-  const session = decodeSession(req.cookies[SESSION_COOKIE]);
-  req.user = session ? { id: session.id, name: session.name, avatar: session.avatar } : null;
+  let session = decodeSession(req.cookies[SESSION_COOKIE]);
+  // Sessão de antes dos perfis (sem o @ do Discord): pede login de novo
+  if (session && session.id.startsWith('d') && session.username === undefined) session = null;
+  req.user = session ? { id: session.id, username: session.username || '', name: session.name, avatar: session.avatar } : null;
   next();
 }
 
@@ -87,30 +90,58 @@ async function discordFetch(path, accessToken) {
 
 // ---------- rotas ----------
 
+/** Só caminhos internos (evita redirecionar pra outro site depois do login). */
+function safeNext(next) {
+  const value = String(next || '/');
+  return /^\/(?![/\\])/.test(value) ? value : '/';
+}
+
+function iconUrl(guild) {
+  return guild?.icon ? `https://cdn.discordapp.com/icons/${guild.id}/${guild.icon}.png?size=128` : '';
+}
+
 export function authRouter() {
   const router = express.Router();
   const redirectUri = `${config.publicUrl}/auth/callback`;
 
-  router.get('/auth/login', (req, res) => {
-    if (config.authMode !== 'discord') return res.redirect('/');
+  function startOAuth(res, { mode, next, params }) {
     const state = crypto.randomBytes(16).toString('hex');
-    res.cookie(STATE_COOKIE, state, cookieOptions(10 * 60 * 1000));
-    const params = new URLSearchParams({
+    res.cookie(STATE_COOKIE, JSON.stringify({ state, mode, next: safeNext(next) }), cookieOptions(10 * 60 * 1000));
+    const query = new URLSearchParams({
       client_id: config.discord.clientId,
       response_type: 'code',
       redirect_uri: redirectUri,
-      scope: config.discord.guildId ? 'identify guilds' : 'identify',
       state,
-      prompt: 'none',
+      ...params,
     });
-    res.redirect(`https://discord.com/oauth2/authorize?${params}`);
+    res.redirect(`https://discord.com/oauth2/authorize?${query}`);
+  }
+
+  router.get('/auth/login', (req, res) => {
+    if (config.authMode !== 'discord') return res.redirect('/');
+    startOAuth(res, { mode: 'login', next: req.query.next, params: { scope: 'identify', prompt: 'none' } });
+  });
+
+  // Colocar o bot num servidor = criar um canal (só pra quem está liberado)
+  router.get('/auth/install', (req, res) => {
+    if (config.authMode !== 'discord') return res.redirect('/');
+    if (!canCreateChannels(req.user)) return res.redirect('/?erro=liberacao');
+    startOAuth(res, {
+      mode: 'install',
+      params: { scope: 'identify bot applications.commands', permissions: '19456' },
+    });
   });
 
   router.get('/auth/callback', async (req, res) => {
     const { code, state } = req.query;
-    const expectedState = req.cookies[STATE_COOKIE];
+    let saved = {};
+    try {
+      saved = JSON.parse(req.cookies[STATE_COOKIE] || '{}');
+    } catch {
+      /* cookie velho */
+    }
     res.clearCookie(STATE_COOKIE, { path: '/' });
-    if (!code || !state || state !== expectedState) return res.redirect('/?erro=login');
+    if (!code || !state || state !== saved.state) return res.redirect('/?erro=login');
 
     try {
       const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
@@ -125,21 +156,30 @@ export function authRouter() {
         }),
       });
       if (!tokenRes.ok) throw new Error(`token ${tokenRes.status}`);
-      const { access_token: accessToken } = await tokenRes.json();
+      const grant = await tokenRes.json();
+      const user = await discordFetch('/users/@me', grant.access_token);
 
-      const user = await discordFetch('/users/@me', accessToken);
-
-      if (config.discord.guildId) {
-        const guilds = await discordFetch('/users/@me/guilds', accessToken);
-        if (!guilds.some((g) => g.id === config.discord.guildId)) return res.redirect('/?erro=servidor');
-      }
-
-      setSession(res, {
+      const session = {
         id: `d${user.id}`,
+        username: user.username,
         name: cleanName(user.global_name || user.username) || 'Sem nome',
         avatar: discordAvatar(user),
-      });
-      res.redirect('/');
+      };
+      upsertUser(session);
+      setSession(res, session);
+
+      if (saved.mode === 'install') {
+        const guild = grant.guild || (req.query.guild_id ? { id: String(req.query.guild_id) } : null);
+        if (!guild) return res.redirect('/?erro=instalacao');
+        if (!canCreateChannels(session)) {
+          await discordBridge.leaveGuild?.(guild.id).catch(() => {});
+          return res.redirect('/?erro=liberacao');
+        }
+        const channel = getChannelByGuild(guild.id) ||
+          createChannel({ guildId: guild.id, name: guild.name || 'Servidor', icon: iconUrl(guild), ownerId: session.id });
+        return res.redirect(`/c/${channel.id}?novo=1`);
+      }
+      res.redirect(safeNext(saved.next));
     } catch (err) {
       console.error('[auth] Falha no login do Discord:', err.message);
       res.redirect('/?erro=login');
@@ -150,7 +190,9 @@ export function authRouter() {
     if (config.authMode !== 'guest') return res.status(403).json({ error: 'Use o login do Discord.' });
     const name = cleanName(req.body?.name);
     if (name.length < 2) return res.status(400).json({ error: 'Escolha um apelido com pelo menos 2 letras.' });
-    setSession(res, { id: `g${crypto.randomBytes(6).toString('hex')}`, name, avatar: '' });
+    const session = { id: `g${crypto.randomBytes(6).toString('hex')}`, username: '', name, avatar: '' };
+    upsertUser(session);
+    setSession(res, session);
     res.json({ ok: true });
   });
 

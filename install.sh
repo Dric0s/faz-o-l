@@ -96,8 +96,7 @@ if [ "${1:-}" = "discord" ]; then
     "DISCORD_CLIENT_ID|Application ID (Client ID)|plain" \
     "DISCORD_CLIENT_SECRET|Client Secret (OAuth2)|secret" \
     "DISCORD_BOT_TOKEN|Token do bot|secret" \
-    "DISCORD_GUILD_ID|ID do servidor (só membros dele entram)|plain" \
-    "DISCORD_NOTIFY_CHANNEL_ID|ID do canal de avisos 'ao vivo'|plain"; do
+    "CREATOR_DISCORD_IDS|IDs de usuário do Discord que podem criar canais (vírgula entre eles)|plain"; do
     IFS='|' read -r key label kind <<<"$item"
     current="$(env_get "$key")"
     if [ "$kind" = secret ]; then
@@ -184,12 +183,8 @@ bold "2) Discord (Enter para pular qualquer item)"
 echo "   Crie uma aplicação em https://discord.com/developers/applications"
 ask DISCORD_CLIENT_ID "   Application ID (Client ID)"
 ask DISCORD_CLIENT_SECRET "   Client Secret (OAuth2) — habilita login com Discord"
-ask DISCORD_GUILD_ID "   ID do servidor (restringe o acesso aos membros)"
+ask CREATOR_DISCORD_IDS "   Seu ID de usuário do Discord (quem pode criar canais; vários separados por vírgula)"
 ask DISCORD_BOT_TOKEN "   Token do bot — habilita /live e avisos"
-DISCORD_NOTIFY_CHANNEL_ID=""
-if [ -n "$DISCORD_BOT_TOKEN" ]; then
-  ask DISCORD_NOTIFY_CHANNEL_ID "   ID do canal para avisos de 'ao vivo'"
-fi
 
 echo
 bold "3) Limites"
@@ -217,9 +212,8 @@ ROOM_NAME=faz-o-l
 
 DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
 DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
-DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+CREATOR_DISCORD_IDS=${CREATOR_DISCORD_IDS}
 DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-DISCORD_NOTIFY_CHANNEL_ID=${DISCORD_NOTIFY_CHANNEL_ID}
 EOF
 
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status | grep -q "Status: active"; then

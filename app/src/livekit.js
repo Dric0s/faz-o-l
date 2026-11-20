@@ -3,23 +3,30 @@ import express from 'express';
 import { AccessToken, RoomServiceClient, TrackSource, WebhookReceiver } from 'livekit-server-sdk';
 import { config } from './config.js';
 import { requireUser } from './auth.js';
+import { channelHooks, channelIdFromRoom, getChannel, requireMember, roomName } from './channels.js';
 
 const { host, apiKey, apiSecret } = config.livekit;
 const roomService = new RoomServiceClient(host, apiKey, apiSecret);
 const webhookReceiver = new WebhookReceiver(apiKey, apiSecret);
 
 /**
- * Eventos emitidos para o bot do Discord:
- *  - 'stream:start' { identity, name }
- *  - 'stream:end'   { identity, name }
- *  - 'room:update'
+ * Eventos emitidos para o bot do Discord (todos com o canal):
+ *  - 'stream:start' { channel, identity, name }
+ *  - 'stream:end'   { channel, identity, name }
+ *  - 'room:update'  { channel }
+ *  - 'clip:published' { channel, clip }   (emitido por clips.js)
  */
 export const liveEvents = new EventEmitter();
 
+// Chave dos mapas abaixo: "<sala>|<identidade>"
+const key = (room, identity) => `${room}|${identity}`;
+
 // Quem está transmitindo agora (preenchido pelos webhooks do LiveKit)
-const activeStreams = new Map(); // identity -> name
+const activeStreams = new Map(); // chave -> nome
 // Quem recebeu vaga e ainda não publicou a tela (para liberar vagas "presas")
-const pendingGrants = new Map(); // identity -> timestamp
+const pendingGrants = new Map(); // chave -> timestamp
+// Tokens do app desktop já emitidos, mas cujo participante ainda não entrou na sala
+const pendingDesktop = new Map(); // chave -> timestamp
 const PENDING_TIMEOUT_MS = 20_000;
 
 const VIEWER_PERMISSION = {
@@ -36,20 +43,20 @@ const STREAMER_PERMISSION = {
   canPublishSources: [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO],
 };
 
-// Mutex simples: evita que 2 pessoas peguem a última vaga ao mesmo tempo
-let lock = Promise.resolve();
-function withLock(fn) {
-  const run = lock.then(fn, fn);
-  lock = run.catch(() => {});
+// Mutex por sala: evita que 2 pessoas peguem a última vaga ao mesmo tempo
+const locks = new Map();
+function withLock(room, fn) {
+  const run = (locks.get(room) || Promise.resolve()).then(fn, fn);
+  locks.set(room, run.catch(() => {}));
   return run;
 }
 
-// O gravador de clipes entra na sala escondido: não conta como pessoa
+// O gravador de clipes entra nas salas escondido: não conta como pessoa
 export const RECORDER_IDENTITY = 'fazol-recorder';
 
-async function listParticipants() {
+async function listParticipants(room) {
   try {
-    const all = await roomService.listParticipants(config.room);
+    const all = await roomService.listParticipants(room);
     return all.filter((p) => p.identity !== RECORDER_IDENTITY);
   } catch {
     return []; // sala ainda não existe
@@ -64,14 +71,14 @@ function hasScreenShare(p) {
   return (p.tracks || []).some(isScreenTrack);
 }
 
-async function setPermission(identity, permission) {
-  await roomService.updateParticipant(config.room, identity, undefined, permission);
+async function setPermission(room, identity, permission) {
+  await roomService.updateParticipant(room, identity, undefined, permission);
 }
 
 // O app desktop transmite como um participante separado: "<id do usuário>:tela"
 const DESKTOP_SUFFIX = ':tela';
 const isDesktop = (identity) => identity.endsWith(DESKTOP_SUFFIX);
-const ownerOf = (identity) => (isDesktop(identity) ? identity.slice(0, -DESKTOP_SUFFIX.length) : identity);
+export const ownerOf = (identity) => (isDesktop(identity) ? identity.slice(0, -DESKTOP_SUFFIX.length) : identity);
 
 // Nome de quem pegou token (o webhook do LiveKit às vezes chega sem o nome)
 const knownNames = new Map(); // id do usuário -> nome
@@ -84,38 +91,40 @@ export function displayName(identity, name) {
   return knownNames.get(ownerOf(identity)) || ownerOf(identity);
 }
 
-
-// Tokens do app desktop já emitidos, mas cujo participante ainda não entrou na sala
-const pendingDesktop = new Map(); // identity -> timestamp
-
 /** Quem ocupa vaga de transmissão: publicando, com permissão, ou desktop prestes a entrar. */
-function streamerIdentities(participants) {
+function streamerIdentities(room, participants) {
   const ids = new Set(
     participants.filter((p) => p.permission?.canPublish || hasScreenShare(p)).map((p) => p.identity),
   );
   const now = Date.now();
-  for (const [identity, since] of pendingDesktop) {
-    if (now - since > PENDING_TIMEOUT_MS) pendingDesktop.delete(identity);
-    else ids.add(identity);
+  for (const [k, since] of pendingDesktop) {
+    if (now - since > PENDING_TIMEOUT_MS) pendingDesktop.delete(k);
+    else if (k.startsWith(`${room}|`)) ids.add(k.slice(room.length + 1));
   }
   return ids;
 }
 
 /** Retorna o erro 409 se as vagas de transmissão acabaram, ou null. */
-function slotsFull(participants) {
-  const ids = streamerIdentities(participants);
+function slotsFull(room, participants) {
+  const ids = streamerIdentities(room, participants);
   if (ids.size < config.maxStreamers) return null;
-  const names = [...ids].map((id) => participants.find((p) => p.identity === id)?.name || knownNames.get(ownerOf(id)) || 'alguém').join(' e ');
+  const names = [...ids]
+    .map((id) => displayName(id, participants.find((p) => p.identity === id)?.name) || 'alguém')
+    .join(' e ');
   return { status: 409, error: `Já tem ${config.maxStreamers} pessoas transmitindo (${names}). Espere uma vaga.` };
 }
 
-async function removeParticipant(identity) {
-  await roomService.removeParticipant(config.room, identity).catch(() => {});
+async function removeParticipant(room, identity) {
+  await roomService.removeParticipant(room, identity).catch(() => {});
 }
 
-/** Estado atual da sala (usado pela API e pelo bot). */
-export async function getRoomState() {
-  const participants = await listParticipants();
+async function ensureRoom(room) {
+  await roomService.createRoom({ name: room, emptyTimeout: 300, maxParticipants: config.maxViewers + config.maxStreamers });
+}
+
+/** Estado atual da sala de um canal (usado pela API, pelos clipes e pelo bot). */
+export async function getRoomState(channel) {
+  const participants = await listParticipants(roomName(channel));
   const streamers = participants
     .filter((p) => p.permission?.canPublish || hasScreenShare(p))
     .map((p) => ({ identity: p.identity, name: displayName(p.identity, p.name), live: hasScreenShare(p) }));
@@ -128,33 +137,50 @@ export async function getRoomState() {
   };
 }
 
+function emitUpdate(room) {
+  const channel = getChannel(channelIdFromRoom(room));
+  if (channel) liveEvents.emit('room:update', { channel });
+}
+
 /** Libera vagas de quem pediu pra transmitir mas nunca publicou a tela. */
 async function sweepStuckGrants() {
-  const participants = await listParticipants();
+  const rooms = new Set([...pendingGrants.keys()].map((k) => k.split('|')[0]));
   const now = Date.now();
-  for (const p of participants) {
-    if (!p.permission?.canPublish) continue;
-    if (hasScreenShare(p)) {
-      pendingGrants.delete(p.identity);
-      continue;
-    }
-    const since = pendingGrants.get(p.identity) ?? 0;
-    if (now - since > PENDING_TIMEOUT_MS) {
-      pendingGrants.delete(p.identity);
-      if (isDesktop(p.identity)) await removeParticipant(p.identity);
-      else await setPermission(p.identity, VIEWER_PERMISSION).catch(() => {});
-      liveEvents.emit('room:update');
+  for (const room of rooms) {
+    for (const p of await listParticipants(room)) {
+      const k = key(room, p.identity);
+      if (!p.permission?.canPublish) continue;
+      if (hasScreenShare(p)) {
+        pendingGrants.delete(k);
+        continue;
+      }
+      const since = pendingGrants.get(k) ?? 0;
+      if (now - since > PENDING_TIMEOUT_MS) {
+        pendingGrants.delete(k);
+        if (isDesktop(p.identity)) await removeParticipant(room, p.identity);
+        else await setPermission(room, p.identity, VIEWER_PERMISSION).catch(() => {});
+        emitUpdate(room);
+      }
     }
   }
 }
 setInterval(() => sweepStuckGrants().catch(() => {}), 10_000).unref();
 
-function endStream(identity) {
-  const name = activeStreams.get(identity);
+function endStream(room, identity) {
+  const k = key(room, identity);
+  const name = activeStreams.get(k);
   if (name === undefined) return;
-  activeStreams.delete(identity);
-  liveEvents.emit('stream:end', { identity, name });
+  activeStreams.delete(k);
+  const channel = getChannel(channelIdFromRoom(room));
+  if (channel) liveEvents.emit('stream:end', { channel, identity, name });
 }
+
+// Membro removido do canal: sai da sala na hora (navegador e app desktop)
+channelHooks.onMemberRemoved = (channel, userId) => {
+  const room = roomName(channel);
+  removeParticipant(room, userId);
+  removeParticipant(room, `${userId}${DESKTOP_SUFFIX}`);
+};
 
 export function livekitRouter() {
   const router = express.Router();
@@ -169,50 +195,55 @@ export function livekitRouter() {
     }
     res.status(200).end();
 
-    if (event.room && event.room.name !== config.room) return;
+    const room = event.room?.name;
+    const channel = getChannel(channelIdFromRoom(room));
+    if (!channel) return;
     const p = event.participant;
 
     switch (event.event) {
       case 'track_published':
-        if (p && isScreenTrack(event.track) && !activeStreams.has(p.identity)) {
-          pendingGrants.delete(p.identity);
-          pendingDesktop.delete(p.identity);
+        if (p && isScreenTrack(event.track) && !activeStreams.has(key(room, p.identity))) {
+          pendingGrants.delete(key(room, p.identity));
+          pendingDesktop.delete(key(room, p.identity));
           const name = displayName(p.identity, p.name);
-          activeStreams.set(p.identity, name);
-          liveEvents.emit('stream:start', { identity: p.identity, name });
+          activeStreams.set(key(room, p.identity), name);
+          liveEvents.emit('stream:start', { channel, identity: p.identity, name });
         }
         break;
       case 'track_unpublished':
         if (p && isScreenTrack(event.track)) {
-          endStream(p.identity);
+          endStream(room, p.identity);
           // Parou de transmitir: devolve a vaga (o participante do app desktop sai da sala)
-          if (isDesktop(p.identity)) removeParticipant(p.identity);
-          else setPermission(p.identity, VIEWER_PERMISSION).catch(() => {});
+          if (isDesktop(p.identity)) removeParticipant(room, p.identity);
+          else setPermission(room, p.identity, VIEWER_PERMISSION).catch(() => {});
         }
         break;
       case 'participant_left':
         if (p) {
-          pendingGrants.delete(p.identity);
-          pendingDesktop.delete(p.identity);
-          endStream(p.identity);
+          pendingGrants.delete(key(room, p.identity));
+          pendingDesktop.delete(key(room, p.identity));
+          endStream(room, p.identity);
         }
         break;
       case 'room_finished':
-        for (const identity of [...activeStreams.keys()]) endStream(identity);
-        pendingGrants.clear();
+        for (const k of [...activeStreams.keys()]) if (k.startsWith(`${room}|`)) endStream(room, k.slice(room.length + 1));
+        for (const k of [...pendingGrants.keys()]) if (k.startsWith(`${room}|`)) pendingGrants.delete(k);
         break;
     }
-    liveEvents.emit('room:update');
+    liveEvents.emit('room:update', { channel });
   });
 
-  router.get('/api/status', async (_req, res) => {
-    res.json(await getRoomState());
+  const member = [requireUser, requireMember];
+
+  router.get('/api/c/:cid/status', ...member, async (req, res) => {
+    res.json(await getRoomState(req.channel));
   });
 
   // Token para entrar na sala (todo mundo entra como espectador)
-  router.post('/api/token', requireUser, async (req, res) => {
+  router.post('/api/c/:cid/token', ...member, async (req, res) => {
     const user = req.user;
-    const participants = await listParticipants();
+    const room = roomName(req.channel);
+    const participants = await listParticipants(room);
     const others = participants.filter((p) => p.identity !== user.id);
     const capacity = config.maxViewers + config.maxStreamers;
     if (others.length >= capacity) {
@@ -220,24 +251,22 @@ export function livekitRouter() {
     }
 
     try {
-      await roomService.createRoom({ name: config.room, emptyTimeout: 300, maxParticipants: capacity });
+      await ensureRoom(room);
     } catch (err) {
       console.error('[livekit] Não consegui criar/verificar a sala:', err.message);
       return res.status(503).json({ error: 'Servidor de vídeo indisponível. Tente novamente.' });
     }
 
     rememberName(user.id, user.name);
-
-    rememberName(user.id, user.name);
     const at = new AccessToken(apiKey, apiSecret, {
       identity: user.id,
       name: user.name,
-      metadata: JSON.stringify({ avatar: user.avatar || '' }),
+      metadata: JSON.stringify({ avatar: user.avatar || '', username: user.username || '' }),
       ttl: '12h',
     });
     at.addGrant({
       roomJoin: true,
-      room: config.room,
+      room,
       canSubscribe: true,
       canPublish: false,
       canPublishData: true,
@@ -248,24 +277,25 @@ export function livekitRouter() {
   });
 
   // Pede uma vaga para transmitir
-  router.post('/api/stream/start', requireUser, async (req, res) => {
+  router.post('/api/c/:cid/stream/start', ...member, async (req, res) => {
     const identity = req.user.id;
+    const room = roomName(req.channel);
     try {
-      const result = await withLock(async () => {
-        const participants = await listParticipants();
+      const result = await withLock(room, async () => {
+        const participants = await listParticipants(room);
         const me = participants.find((p) => p.identity === identity);
         if (!me) return { status: 409, error: 'Entre na sala antes de transmitir.' };
         if (me.permission?.canPublish) return { status: 200 };
 
-        const full = slotsFull(participants);
+        const full = slotsFull(room, participants);
         if (full) return full;
 
-        pendingGrants.set(identity, Date.now());
-        await setPermission(identity, STREAMER_PERMISSION);
+        pendingGrants.set(key(room, identity), Date.now());
+        await setPermission(room, identity, STREAMER_PERMISSION);
         return { status: 200 };
       });
       if (result.status !== 200) return res.status(result.status).json({ error: result.error });
-      liveEvents.emit('room:update');
+      emitUpdate(room);
       res.json({ ok: true });
     } catch (err) {
       console.error('[livekit] stream/start:', err.message);
@@ -274,48 +304,42 @@ export function livekitRouter() {
   });
 
   // App desktop: token próprio de transmissão (participante "<id>:tela", só publica a tela)
-  router.post('/api/desktop/token', requireUser, async (req, res) => {
+  router.post('/api/c/:cid/desktop/token', ...member, async (req, res) => {
     const user = req.user;
+    const room = roomName(req.channel);
     const identity = `${user.id}${DESKTOP_SUFFIX}`;
     try {
-      const result = await withLock(async () => {
-        const participants = await listParticipants();
-        const ids = streamerIdentities(participants);
+      const result = await withLock(room, async () => {
+        const participants = await listParticipants(room);
+        const ids = streamerIdentities(room, participants);
         if (ids.has(user.id)) return { status: 409, error: 'Você já está transmitindo pelo navegador.' };
         if (!ids.has(identity)) {
-          const full = slotsFull(participants);
+          const full = slotsFull(room, participants);
           if (full) return full;
         }
-        pendingDesktop.set(identity, Date.now());
+        pendingDesktop.set(key(room, identity), Date.now());
         return { status: 200 };
       });
       if (result.status !== 200) return res.status(result.status).json({ error: result.error });
 
-      await roomService.createRoom({
-        name: config.room,
-        emptyTimeout: 300,
-        maxParticipants: config.maxViewers + config.maxStreamers,
-      });
-
-      rememberName(user.id, user.name);
-
+      await ensureRoom(room);
       rememberName(user.id, user.name);
       const at = new AccessToken(apiKey, apiSecret, {
         identity,
         name: user.name,
-        metadata: JSON.stringify({ avatar: user.avatar || '', desktop: true, owner: user.id }),
+        metadata: JSON.stringify({ avatar: user.avatar || '', username: user.username || '', desktop: true, owner: user.id }),
         ttl: '12h',
       });
       at.addGrant({
         roomJoin: true,
-        room: config.room,
+        room,
         canSubscribe: false, // só envia: não gasta banda recebendo as outras lives
         canPublish: true,
         canPublishData: false,
         canPublishSources: [TrackSource.SCREEN_SHARE, TrackSource.SCREEN_SHARE_AUDIO],
         canUpdateOwnMetadata: false,
       });
-      liveEvents.emit('room:update');
+      emitUpdate(room);
       res.json({
         token: await at.toJwt(),
         url: config.livekit.publicUrl || config.publicUrl.replace(/^http/, 'ws'),
@@ -328,19 +352,21 @@ export function livekitRouter() {
   });
 
   // Encerra a transmissão do app desktop (tira o participante "<id>:tela" da sala)
-  router.post('/api/desktop/stop', requireUser, async (req, res) => {
+  router.post('/api/c/:cid/desktop/stop', ...member, async (req, res) => {
+    const room = roomName(req.channel);
     const identity = `${req.user.id}${DESKTOP_SUFFIX}`;
-    pendingDesktop.delete(identity);
-    await removeParticipant(identity);
-    liveEvents.emit('room:update');
+    pendingDesktop.delete(key(room, identity));
+    await removeParticipant(room, identity);
+    emitUpdate(room);
     res.json({ ok: true });
   });
 
   // Encerra a transmissão e devolve a vaga
-  router.post('/api/stream/stop', requireUser, async (req, res) => {
-    pendingGrants.delete(req.user.id);
-    await setPermission(req.user.id, VIEWER_PERMISSION).catch(() => {});
-    liveEvents.emit('room:update');
+  router.post('/api/c/:cid/stream/stop', ...member, async (req, res) => {
+    const room = roomName(req.channel);
+    pendingGrants.delete(key(room, req.user.id));
+    await setPermission(room, req.user.id, VIEWER_PERMISSION).catch(() => {});
+    emitUpdate(room);
     res.json({ ok: true });
   });
 

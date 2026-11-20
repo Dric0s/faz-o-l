@@ -4,13 +4,17 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { config } from './config.js';
 import { authRouter, sessionMiddleware } from './auth.js';
+import { canCreateChannels, channelsRouter, migrateLegacy } from './channels.js';
 import { livekitRouter } from './livekit.js';
 import { clipsRouter } from './clips.js';
 import { startBot } from './bot.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(__dirname, '..', 'public');
 const require = createRequire(import.meta.url);
 const livekitClientDist = path.dirname(require.resolve('livekit-client'));
+
+migrateLegacy();
 
 const app = express();
 app.set('trust proxy', true);
@@ -20,6 +24,7 @@ app.get('/healthz', (_req, res) => res.send('ok'));
 
 app.use(sessionMiddleware);
 app.use(authRouter());
+app.use(channelsRouter());
 app.use(livekitRouter());
 app.use(await clipsRouter());
 
@@ -27,6 +32,7 @@ app.get('/api/me', (req, res) => {
   res.json({
     user: req.user,
     authMode: config.authMode,
+    canCreate: canCreateChannels(req.user),
     limits: { maxStreamers: config.maxStreamers, maxViewers: config.maxViewers },
   });
 });
@@ -46,7 +52,13 @@ app.use(
   }),
 );
 
-app.use(express.static(path.join(__dirname, '..', 'public'), { setHeaders: revalidate }));
+app.use(express.static(publicDir, { setHeaders: revalidate }));
+
+// Rotas do site (canal, perfil, convite): o app.js decide o que mostrar
+app.get(['/c/:id', '/u/:username', '/convite/:code'], (_req, res) => {
+  revalidate(res);
+  res.sendFile(path.join(publicDir, 'index.html'));
+});
 
 app.listen(config.port, () => {
   console.log(`[app] Faz o L rodando em ${config.publicUrl} (porta ${config.port}, login: ${config.authMode})`);

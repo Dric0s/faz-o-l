@@ -94,6 +94,13 @@ Pronto: abra `https://SEU_DOMINIO` ou use `/live` no Discord.
 
 ## Como usar
 
+**Canais:** cada servidor do Discord vira um canal de transmissão, com a sua sala, os seus clipes e os seus avisos.
+- Quem está em `CREATOR_DISCORD_IDS` vê o botão **Criar canal num servidor do Discord** no site. Esse botão coloca o bot no servidor e transforma essa pessoa no **dono** do canal.
+- Só o dono convida: botão **⚙ Canal** no site (links que expiram em 1, 7 ou 30 dias, com limite de usos opcional) ou o comando `/convite` no Discord. Ali ele também escolhe os canais de texto dos avisos de live e dos clipes, e remove membros.
+- Se o bot for adicionado a um servidor por fora do site, ele sai sozinho depois de 1 minuto.
+
+**Clipes e perfis:** depois de clipar dá pra pôr título e descrição (os dois opcionais). Quem for marcado com `@usuario` (o @ do Discord) fica com o clipe no perfil. O perfil (`/u/usuario`, clicando no nome de alguém) mostra os clipes feitos das lives da pessoa e os clipes em que ela foi marcada. Só aparecem clipes dos canais em que quem está vendo também é membro.
+
 **Pra transmitir:** use Chrome ou Edge no computador → **Transmitir minha tela** → escolha a tela/janela/aba.
 - **Windows:** marque **"Compartilhar áudio do sistema"** ao escolher a tela inteira.
 - **Aba do navegador** (YouTube, Netflix etc.): marque **"Compartilhar áudio da guia"**. Funciona em qualquer sistema.
@@ -120,9 +127,8 @@ docker compose down              # desliga tudo
 | `MAX_STREAMERS` | `2` | Pessoas transmitindo ao mesmo tempo |
 | `MAX_VIEWERS` | `15` | Espectadores |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | — | Ativam o login com Discord |
-| `DISCORD_GUILD_ID` | — | Libera só membros deste servidor |
-| `DISCORD_BOT_TOKEN` | — | Ativa o bot (`/live`, avisos, status) |
-| `DISCORD_NOTIFY_CHANNEL_ID` | — | Canal dos avisos "fulano está ao vivo" |
+| `CREATOR_DISCORD_IDS` | — | IDs de usuário do Discord que podem criar canais (colocar o bot num servidor) |
+| `DISCORD_BOT_TOKEN` | — | Ativa o bot (`/live`, `/convite`, avisos de live e clipes) |
 | `LIVEKIT_NODE_IP` | auto | IP público da VPS |
 | `LIVEKIT_VERSION` | `v1.13.11` | Tag da imagem `livekit/livekit-server` |
 
@@ -149,7 +155,7 @@ Abra http://localhost:3000. O `localhost` conta como contexto seguro, então a c
 - **Certificado HTTPS não sai:** o DNS ainda não aponta pra VPS, ou a porta 80 está fechada. Veja com `docker compose logs caddy` (ou, com Coolify, `docker logs coolify-proxy`).
 - **Live sem som:** a caixa de compartilhar áudio não foi marcada na janela do navegador, ou você está no macOS compartilhando uma janela (só abas têm áudio lá).
 - **Travando para quem assiste:** escolha **Economia** na live, ou transmita em 720p/30fps.
-- **"Você precisa ser membro do servidor":** o `DISCORD_GUILD_ID` está errado, ou a pessoa não está no servidor.
+- **"Você não é membro deste canal":** peça um link de convite pro dono do canal (botão ⚙ Canal no site ou `/convite` no Discord).
 
 ## Stack
 

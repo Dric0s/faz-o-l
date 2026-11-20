@@ -25,6 +25,8 @@ const discord = {
   notifyChannelId: env.DISCORD_NOTIFY_CHANNEL_ID || '',
   // Canal onde o bot posta o link de cada clipe (vazio = usa o canal de avisos)
   clipsChannelId: env.DISCORD_CLIPS_CHANNEL_ID || '',
+  // Quem pode colocar o bot num servidor e criar um canal (ids de usuário do Discord, separados por vírgula)
+  creatorIds: (env.CREATOR_DISCORD_IDS || '').split(/[\s,]+/).filter((id) => /^\d{5,25}$/.test(id)),
 };
 
 export const config = {

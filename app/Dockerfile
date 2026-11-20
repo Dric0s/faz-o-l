@@ -10,8 +10,8 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 COPY src ./src
 COPY public ./public
 
-# Pasta dos clipes (volume compartilhado com o gravador, mesmo UID 1000)
-RUN mkdir -p /data/clips && chown node:node /data/clips
+# Clipes (volume compartilhado com o gravador, mesmo UID 1000) e banco de dados
+RUN mkdir -p /data/clips /data/app && chown node:node /data/clips /data/app
 
 USER node
 EXPOSE 3000

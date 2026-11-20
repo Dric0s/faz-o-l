@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-20.5';
+const SITE_VERSION = '2026-11-21.1';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -63,12 +63,13 @@ async function api(path, options = {}) {
   return data;
 }
 
-function show(view) {
-  for (const id of ['view-login', 'view-join', 'view-room']) $(`#${id}`).hidden = id !== view;
-}
 
 function avatarOf(participant) {
   try { return JSON.parse(participant.metadata || '{}').avatar || ''; } catch { return ''; }
+}
+
+function usernameOf(participant) {
+  try { return JSON.parse(participant.metadata || '{}').username || ''; } catch { return ''; }
 }
 
 function livekitUrl(fromServer) {
@@ -76,43 +77,236 @@ function livekitUrl(fromServer) {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 }
 
+// ---------------- navegação ----------------
+// Rotas: /  (meus canais) • /c/<id> (canal) • /u/<@> (perfil) • /convite/<código>
+
+const VIEWS = ['view-login', 'view-home', 'view-invite', 'view-join', 'view-room', 'view-profile'];
+function show(view) {
+  for (const id of VIEWS) $(`#${id}`).hidden = id !== view;
+}
+
+/** Caminho da API do canal atual. */
+const ch = (path) => `/api/c/${state.channel.id}${path}`;
+
+async function navigate(path, { replace = false } = {}) {
+  if (path !== location.pathname + location.search) {
+    history[replace ? 'replaceState' : 'pushState'](null, '', path);
+  }
+  return route();
+}
+
+// Links internos (data-link) navegam sem recarregar a página
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-link]');
+  if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+  e.preventDefault();
+  navigate(a.getAttribute('href'));
+});
+window.addEventListener('popstate', () => route());
+
+function profileHref(username) {
+  return username ? `/u/${encodeURIComponent(username)}` : '#';
+}
+
+function setIcon(img, fallback, url) {
+  img.hidden = !url;
+  if (url) img.src = url;
+  if (fallback) fallback.hidden = !!url;
+}
+
+async function route() {
+  const path = location.pathname;
+  const params = new URLSearchParams(location.search);
+
+  if (!state.me) {
+    const me = await api('/api/me');
+    state.limits = me.limits;
+    state.authMode = me.authMode;
+    state.canCreate = me.canCreate;
+    state.me = me.user;
+  }
+  if (!state.me) return showLogin(params.get('erro'), path);
+
+  // Saiu da página do canal: sai da sala
+  const channelMatch = path.match(/^\/c\/([\w-]+)/);
+  if (state.room && (!channelMatch || channelMatch[1] !== state.channel?.id)) await leave();
+
+  const inviteMatch = path.match(/^\/convite\/([\w-]+)/);
+  const profileMatch = path.match(/^\/u\/([^/]+)/);
+  if (inviteMatch) return showInvite(inviteMatch[1]);
+  if (profileMatch) return showProfile(decodeURIComponent(profileMatch[1]));
+  if (channelMatch) {
+    if (params.get('novo')) {
+      toast('Canal criado! Abra ⚙ Canal pra convidar a galera.');
+      history.replaceState(null, '', path);
+    }
+    return showChannel(channelMatch[1]);
+  }
+  return showHome(params.get('erro'));
+}
+
 // ---------------- login ----------------
 
-async function init() {
-  const params = new URLSearchParams(location.search);
-  const erro = params.get('erro');
-  if (erro) history.replaceState(null, '', '/');
+const LOGIN_ERRORS = {
+  login: 'Não foi possível fazer login. Tente de novo.',
+  liberacao: 'Sua conta não está liberada para criar canais. Peça pro dono do Faz o L.',
+  instalacao: 'Não deu pra colocar o bot no servidor. Tente de novo.',
+};
 
-  const me = await api('/api/me');
-  state.limits = me.limits;
+function showLogin(erro, next) {
+  show('view-login');
+  $('#btn-discord').hidden = state.authMode !== 'discord';
+  $('#btn-discord').href = `/auth/login?next=${encodeURIComponent(next || '/')}`;
+  $('#form-guest').hidden = state.authMode !== 'guest';
+  $('#login-sub').textContent = next?.startsWith('/convite/')
+    ? 'Entre com o Discord para aceitar o convite.'
+    : 'Transmita sua tela pra galera com quase zero de delay.';
+  if (erro) {
+    $('#login-error').textContent = LOGIN_ERRORS[erro] || LOGIN_ERRORS.login;
+    $('#login-error').hidden = false;
+    history.replaceState(null, '', location.pathname);
+  }
+}
 
-  if (!me.user) {
-    show('view-login');
-    $('#btn-discord').hidden = me.authMode !== 'discord';
-    $('#form-guest').hidden = me.authMode !== 'guest';
-    if (erro) {
-      const msg = erro === 'servidor'
-        ? 'Você precisa ser membro do servidor do Discord para entrar.'
-        : 'Não foi possível fazer login. Tente de novo.';
-      $('#login-error').textContent = msg;
-      $('#login-error').hidden = false;
+$('#form-guest').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/api/guest', { method: 'POST', body: { name: $('#guest-name').value } });
+    state.me = null;
+    route();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+async function logout() {
+  await leave();
+  await api('/auth/logout', { method: 'POST' }).catch(() => {});
+  location.href = '/';
+}
+$('#btn-logout-home').addEventListener('click', logout);
+
+// ---------------- meus canais ----------------
+
+async function showHome(erro) {
+  show('view-home');
+  document.title = 'Faz o L';
+  $('#home-name').textContent = state.me.name;
+  setIcon($('#home-avatar'), null, state.me.avatar);
+  $('#home-me').href = profileHref(state.me.username);
+  $('#home-me').toggleAttribute('data-link', !!state.me.username);
+  $('#home-error').hidden = !erro;
+  if (erro) {
+    $('#home-error').textContent = LOGIN_ERRORS[erro] || LOGIN_ERRORS.login;
+    history.replaceState(null, '', '/');
+  }
+  $('#btn-create').hidden = !state.canCreate;
+
+  let channels = [];
+  try {
+    ({ channels } = await api('/api/channels'));
+  } catch (err) {
+    toast(err.message, true);
+  }
+  // Na primeira visita, com um canal só: entra direto nele
+  const first = !state.visitedHome;
+  state.visitedHome = true;
+  if (channels.length === 1 && !erro && first) return navigate(`/c/${channels[0].id}`, { replace: true });
+
+  $('#no-channels').hidden = channels.length > 0;
+  $('#channel-list').replaceChildren(
+    ...channels.map((c) => {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = `/c/${c.id}`;
+      a.dataset.link = '';
+      if (c.icon) {
+        const img = document.createElement('img');
+        img.src = c.icon;
+        img.alt = '';
+        a.append(img);
+      } else {
+        const span = document.createElement('span');
+        span.className = 'guild-fallback';
+        span.textContent = c.name.slice(0, 1).toUpperCase();
+        a.append(span);
+      }
+      const name = document.createElement('b');
+      name.textContent = c.name;
+      const role = document.createElement('span');
+      role.className = 'role';
+      role.textContent = c.role === 'owner' ? 'dono' : '';
+      a.append(name, role);
+      li.append(a);
+      return li;
+    }),
+  );
+}
+
+// ---------------- convite ----------------
+
+async function showInvite(code) {
+  show('view-invite');
+  $('#invite-error').hidden = true;
+  $('#btn-accept').hidden = false;
+  try {
+    const info = await api(`/api/invites/${code}`);
+    $('#invite-name').textContent = info.channel.name;
+    setIcon($('#invite-icon'), null, info.channel.icon);
+    if (info.member) return navigate(`/c/${info.channel.id}`, { replace: true });
+    if (!info.valid) {
+      $('#invite-error').textContent = 'Esse convite expirou ou já foi usado. Peça outro pro dono do canal.';
+      $('#invite-error').hidden = false;
+      $('#btn-accept').hidden = true;
     }
-    return;
+    $('#btn-accept').onclick = async () => {
+      try {
+        const { channelId } = await api(`/api/invites/${code}/accept`, { method: 'POST' });
+        toast(`Bem-vindo ao ${info.channel.name}!`);
+        navigate(`/c/${channelId}`, { replace: true });
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  } catch (err) {
+    $('#invite-name').textContent = 'Convite inválido';
+    $('#invite-error').textContent = err.message;
+    $('#invite-error').hidden = false;
+    $('#btn-accept').hidden = true;
   }
+}
 
-  state.me = me.user;
-  show('view-join');
-  $('#join-name').textContent = me.user.name;
-  if (me.user.avatar) {
-    $('#join-avatar').src = me.user.avatar;
-    $('#join-avatar').hidden = false;
+// ---------------- canal ----------------
+
+async function showChannel(id) {
+  if (state.room && state.channel?.id === id) return show('view-room');
+  try {
+    state.channel = await api(`/api/c/${id}`);
+  } catch (err) {
+    toast(err.message, true);
+    return navigate('/', { replace: true });
   }
+  state.limits = state.channel.limits;
+  state.members = null;
+  const c = state.channel;
+  document.title = `${c.name} • Faz o L`;
+  $('#join-channel').textContent = c.name;
+  $('#room-name').textContent = c.name;
+  setIcon($('#join-icon'), $('#join-logo'), c.icon);
+  setIcon($('#room-icon'), $('#room-logo'), c.icon);
+  $('#btn-manage').hidden = c.role !== 'owner';
+  $('#btn-profile').href = profileHref(state.me.username);
+  $('#btn-profile').toggleAttribute('data-link', !!state.me.username);
+
+  show('view-join');
+  $('#join-name').textContent = state.me.name;
+  setIcon($('#join-avatar'), null, state.me.avatar);
   refreshJoinStatus();
 }
 
 async function refreshJoinStatus() {
   try {
-    const s = await api('/api/status');
+    const s = await api(ch('/status'));
     const live = s.streamers.filter((x) => x.live);
     $('#join-status').textContent = live.length
       ? `🔴 Ao vivo: ${live.map((x) => x.name).join(' e ')} • ${s.viewers} assistindo`
@@ -122,22 +316,17 @@ async function refreshJoinStatus() {
   }
 }
 
-$('#form-guest').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    await api('/api/guest', { method: 'POST', body: { name: $('#guest-name').value } });
-    init();
-  } catch (err) {
-    toast(err.message, true);
+/** Membros do canal (pra marcar com @). */
+async function channelMembers() {
+  if (!state.members) {
+    try {
+      state.members = (await api(ch('/members'))).members;
+    } catch {
+      state.members = [];
+    }
   }
-});
-
-async function logout() {
-  await leave();
-  await api('/auth/logout', { method: 'POST' }).catch(() => {});
-  location.reload();
+  return state.members;
 }
-$('#btn-logout-join').addEventListener('click', logout);
 
 // ---------------- sala ----------------
 
@@ -154,7 +343,7 @@ async function join() {
   btn.disabled = true;
   btn.textContent = 'Entrando…';
   try {
-    const { token, url } = await api('/api/token', { method: 'POST' });
+    const { token, url } = await api(ch('/token'), { method: 'POST' });
 
     const room = new Room({
       adaptiveStream: false, // a qualidade é escolhida pelo espectador
@@ -488,7 +677,14 @@ function renderPresence() {
           span.textContent = name.slice(0, 1).toUpperCase();
           li.append(span);
         }
-        const label = document.createElement('span');
+        const username = usernameOf(p);
+        const label = document.createElement(username ? 'a' : 'span');
+        if (username) {
+          label.href = profileHref(username);
+          label.dataset.link = '';
+          label.className = 'person-link';
+          label.title = `Perfil de ${name}`;
+        }
         label.textContent = p === state.room.localParticipant ? `${name} (você)` : name;
         li.append(label);
         if (isStreaming(p)) {
@@ -574,7 +770,7 @@ async function startStream() {
 
   try {
     // 2) Pede uma vaga ao servidor
-    await api('/api/stream/start', { method: 'POST' });
+    await api(ch('/stream/start'), { method: 'POST' });
     await waitForPublishPermission();
 
     // 3) Publica
@@ -618,7 +814,7 @@ async function startStream() {
   } catch (err) {
     stream.getTracks().forEach((t) => t.stop());
     await unpublishScreen();
-    await api('/api/stream/stop', { method: 'POST' }).catch(() => {});
+    await api(ch('/stream/stop'), { method: 'POST' }).catch(() => {});
     toast(err.message || 'Não foi possível transmitir.', true);
   } finally {
     state.busy = false;
@@ -650,10 +846,10 @@ async function stopStream() {
   if (!cleanupLocal()) return;
   if (wasNative) {
     await desktop.core.invoke('stop_stream').catch(() => {});
-    await api('/api/desktop/stop', { method: 'POST' }).catch(() => {});
+    await api(ch('/desktop/stop'), { method: 'POST' }).catch(() => {});
   } else {
     await unpublishScreen();
-    if (state.room) await api('/api/stream/stop', { method: 'POST' }).catch(() => {});
+    if (state.room) await api(ch('/stream/stop'), { method: 'POST' }).catch(() => {});
   }
   renderPresence();
 }
@@ -666,18 +862,65 @@ document.addEventListener('click', () => {
 });
 
 let clipsTimer = null;
+const lengthLabel = (seconds) => (seconds >= 60 ? `${seconds / 60} min` : `${seconds} s`);
 
 async function createClip(streamer, seconds) {
-  toast(`✂ Gerando clipe dos últimos ${seconds >= 60 ? `${seconds / 60} min` : `${seconds} s`}…`);
+  toast(`✂ Gerando clipe dos últimos ${lengthLabel(seconds)}…`);
   try {
-    const clip = await api('/api/clips', { method: 'POST', body: { streamer, seconds } });
-    toast('Clipe pronto! Ele está na lista de Clipes.');
-    await loadClips();
+    const clip = await api(ch('/clips'), { method: 'POST', body: { streamer, seconds } });
+    loadClips();
+    openClipDialog(clip);
     return clip;
   } catch (err) {
     toast(err.message, true);
   }
 }
+
+// Depois de clipar: título e descrição (opcionais). Publicar/Pular manda o link pro Discord.
+let editingClip = null;
+function openClipDialog(clip) {
+  editingClip = clip;
+  $('#clip-preview').src = clip.url;
+  $('#clip-title').value = clip.title || '';
+  $('#clip-description').value = clip.description || '';
+  channelMembers(); // já carrega a lista pro @
+  $('#dlg-clip').showModal();
+  setTimeout(() => $('#clip-title').focus(), 50);
+}
+
+async function finishClipDialog(withDetails) {
+  const clip = editingClip;
+  editingClip = null;
+  $('#dlg-clip').close();
+  $('#clip-preview').removeAttribute('src');
+  hideMentionBox();
+  if (!clip) return;
+  const body = { publish: true };
+  if (withDetails) {
+    body.title = $('#clip-title').value;
+    body.description = $('#clip-description').value;
+  }
+  try {
+    const saved = await api(`/api/clips/${clip.id}`, { method: 'PATCH', body });
+    const tagged = saved.mentions.length ? ` • ${saved.mentions.length} marcado(s)` : '';
+    toast(`Clipe publicado!${tagged}`);
+    loadClips();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+$('#form-clip').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (editDone) saveEdit();
+  else finishClipDialog(true);
+});
+$('#clip-skip').addEventListener('click', () => (editDone ? $('#dlg-clip').close() : finishClipDialog(false)));
+$('#dlg-clip').addEventListener('cancel', (e) => {
+  e.preventDefault();
+  if (!$('#mention-box').hidden) return hideMentionBox();
+  if (editDone) return $('#dlg-clip').close();
+  finishClipDialog(false);
+});
 
 function timeAgo(ms) {
   const s = Math.round((Date.now() - ms) / 1000);
@@ -693,105 +936,492 @@ function timeLeft(expiresAt) {
 }
 
 async function loadClips() {
-  if (!state.me) return;
+  if (!state.me || !state.channel) return;
   try {
-    const { clips } = await api('/api/clips');
-    renderClips(clips);
+    const { clips } = await api(ch('/clips'));
+    $('#clips-count').textContent = clips.length ? `(${clips.length})` : '';
+    renderClipList($('#clips'), clips, { onChange: loadClips, empty: 'Nenhum clipe ainda.' });
   } catch {
     /* sem clipes por enquanto */
   }
 }
 
-function renderClips(clips) {
-  $('#clips-count').textContent = clips.length ? `(${clips.length})` : '';
-  const list = $('#clips');
+/** Texto com os @ marcados virando link pro perfil. */
+function withMentions(text, mentions) {
+  const known = new Map(mentions.map((u) => [u.username?.toLowerCase(), u]));
+  const frag = document.createDocumentFragment();
+  let last = 0;
+  for (const m of text.matchAll(/@([a-z0-9_.]{2,32})/gi)) {
+    const username = m[1].replace(/\.+$/, '');
+    const user = known.get(username.toLowerCase());
+    if (!user) continue;
+    frag.append(text.slice(last, m.index));
+    const a = document.createElement('a');
+    a.className = 'mention';
+    a.href = profileHref(user.username);
+    a.dataset.link = '';
+    a.title = user.name;
+    a.textContent = `@${username}`;
+    frag.append(a);
+    last = m.index + 1 + username.length;
+  }
+  frag.append(text.slice(last));
+  return frag;
+}
+
+function personLink(person) {
+  if (!person.username) return document.createTextNode(person.name);
+  const a = document.createElement('a');
+  a.className = 'person-link';
+  a.href = profileHref(person.username);
+  a.dataset.link = '';
+  a.textContent = person.name;
+  return a;
+}
+
+function clipCard(clip, { onChange, showChannel = false }) {
+  const li = document.createElement('li');
+  li.className = 'clip';
+
+  const video = document.createElement('video');
+  video.src = clip.url;
+  video.preload = 'metadata';
+  video.controls = true;
+  video.playsInline = true;
+
+  const meta = document.createElement('div');
+  meta.className = 'clip-meta';
+  const title = document.createElement('div');
+  title.className = 'clip-title';
+  if (clip.title) title.append(withMentions(clip.title, clip.mentions));
+  else title.append('Live de ', personLink(clip.streamer));
+  meta.append(title);
+
+  if (clip.description) {
+    const desc = document.createElement('div');
+    desc.className = 'clip-desc';
+    desc.append(withMentions(clip.description, clip.mentions));
+    meta.append(desc);
+  }
+
+  const info = document.createElement('div');
+  info.className = 'muted';
+  if (clip.title) info.append('live de ', personLink(clip.streamer), ' • ');
+  info.append(`${lengthLabel(clip.seconds)} • por `, personLink(clip.creator));
+  info.append(` • ${timeAgo(clip.createdAt)} • ${clip.saved ? 'salvo ⭐' : timeLeft(clip.expiresAt)}`);
+  if (showChannel && clip.channel) info.append(` • ${clip.channel.name}`);
+  meta.append(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'clip-actions';
+  const link = `${location.origin}${clip.page}`;
+
+  const copy = document.createElement('button');
+  copy.textContent = '🔗 Copiar link';
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      toast('Link copiado! Cole no Discord.');
+    } catch {
+      prompt('Copie o link do clipe:', link);
+    }
+  });
+
+  const download = document.createElement('a');
+  download.textContent = '⬇ Baixar';
+  download.href = clip.url;
+  download.download = `faz-o-l-${clip.id}.${clip.mime.includes('mp4') ? 'mp4' : 'webm'}`;
+  actions.append(copy, download);
+
+  if (clip.mine) {
+    const edit = document.createElement('button');
+    edit.textContent = '✏ Editar';
+    edit.title = 'Título, descrição e marcações';
+    edit.addEventListener('click', () => openEditDialog(clip, onChange));
+
+    const save = document.createElement('button');
+    save.textContent = clip.saved ? '⭐ Salvo' : '☆ Salvar';
+    save.className = clip.saved ? 'saved' : '';
+    save.title = clip.saved ? 'Clique pra deixar expirar em 24 h' : 'Guardar pra sempre';
+    save.addEventListener('click', async () => {
+      try {
+        await api(`/api/clips/${clip.id}`, { method: 'PATCH', body: { saved: !clip.saved } });
+        onChange?.();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+    actions.append(edit, save);
+  }
+  if (clip.canDelete) {
+    const del = document.createElement('button');
+    del.textContent = '🗑';
+    del.title = 'Excluir clipe';
+    del.className = 'danger';
+    del.addEventListener('click', async () => {
+      if (!confirm('Excluir este clipe? Não dá pra desfazer.')) return;
+      try {
+        await api(`/api/clips/${clip.id}`, { method: 'DELETE' });
+        onChange?.();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+    actions.append(del);
+  }
+
+  li.append(video, meta, actions);
+  return li;
+}
+
+function renderClipList(list, clips, options) {
   if (!clips.length) {
-    list.innerHTML = '<li class="empty-clips">Nenhum clipe ainda.</li>';
+    const li = document.createElement('li');
+    li.className = 'empty-clips';
+    li.textContent = options.empty;
+    list.replaceChildren(li);
     return;
   }
-  list.replaceChildren(
-    ...clips.map((clip) => {
-      const li = document.createElement('li');
-      li.className = 'clip';
-
-      const video = document.createElement('video');
-      video.src = clip.url;
-      video.preload = 'metadata';
-      video.controls = true;
-      video.playsInline = true;
-
-      const meta = document.createElement('div');
-      meta.className = 'clip-meta';
-      const title = document.createElement('b');
-      title.textContent = clip.streamer;
-      const len = clip.seconds >= 60 ? `${clip.seconds / 60} min` : `${clip.seconds} s`;
-      const info = document.createElement('div');
-      info.className = 'muted';
-      info.textContent = `${len} • por ${clip.creator} • ${timeAgo(clip.createdAt)} • ${clip.saved ? 'salvo ⭐' : timeLeft(clip.expiresAt)}`;
-      meta.append(title, info);
-
-      const actions = document.createElement('div');
-      actions.className = 'clip-actions';
-      const link = `${location.origin}${clip.page}`;
-
-      const copy = document.createElement('button');
-      copy.textContent = '🔗 Copiar link';
-      copy.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(link);
-          toast('Link copiado! Cole no Discord.');
-        } catch {
-          prompt('Copie o link do clipe:', link);
-        }
-      });
-
-      const download = document.createElement('a');
-      download.textContent = '⬇ Baixar';
-      download.href = clip.url;
-      download.download = `faz-o-l-${clip.streamer}-${clip.id}.${clip.mime.includes('mp4') ? 'mp4' : 'webm'}`;
-
-      actions.append(copy, download);
-
-      if (clip.mine) {
-        const save = document.createElement('button');
-        save.textContent = clip.saved ? '⭐ Salvo' : '☆ Salvar';
-        save.className = clip.saved ? 'saved' : '';
-        save.title = clip.saved ? 'Clique pra deixar expirar em 24 h' : 'Guardar pra sempre';
-        save.addEventListener('click', async () => {
-          try {
-            await api(`/api/clips/${clip.id}/save`, { method: 'POST', body: { saved: !clip.saved } });
-            loadClips();
-          } catch (err) {
-            toast(err.message, true);
-          }
-        });
-
-        const del = document.createElement('button');
-        del.textContent = '🗑';
-        del.title = 'Excluir clipe';
-        del.className = 'danger';
-        del.addEventListener('click', async () => {
-          if (!confirm('Excluir este clipe? Não dá pra desfazer.')) return;
-          try {
-            await api(`/api/clips/${clip.id}`, { method: 'DELETE' });
-            loadClips();
-          } catch (err) {
-            toast(err.message, true);
-          }
-        });
-        actions.append(save, del);
-      }
-
-      li.append(video, meta, actions);
-      return li;
-    }),
-  );
+  list.replaceChildren(...clips.map((clip) => clipCard(clip, options)));
 }
+
+// Editar um clipe já publicado (o Discord não recebe de novo)
+let editDone = null;
+function openEditDialog(clip, onChange) {
+  editingClip = null;
+  editDone = { clip, onChange };
+  // No perfil, o clipe pode ser de outro canal: o @ sugere os membros de lá
+  state.mentionChannel = clip.channel && clip.channel.id !== state.channel?.id ? clip.channel.id : null;
+  $('#clip-preview').src = clip.url;
+  $('#clip-title').value = clip.title || '';
+  $('#clip-description').value = clip.description || '';
+  $('#dlg-clip').showModal();
+}
+async function saveEdit() {
+  const { clip, onChange } = editDone;
+  editDone = null;
+  $('#dlg-clip').close();
+  try {
+    await api(`/api/clips/${clip.id}`, {
+      method: 'PATCH',
+      body: { title: $('#clip-title').value, description: $('#clip-description').value },
+    });
+    toast('Clipe atualizado.');
+    onChange?.();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+$('#dlg-clip').addEventListener('close', () => {
+  editDone = null;
+  state.mentionChannel = null;
+  hideMentionBox();
+});
 
 function startClipsRefresh() {
   loadClips();
   clearInterval(clipsTimer);
   clipsTimer = setInterval(loadClips, 30_000);
+}
+
+// ---------------- autocompletar @ ----------------
+
+const mentionState = { field: null, start: 0, items: [], active: 0 };
+
+async function mentionCandidates() {
+  const channelId = state.mentionChannel || state.channel?.id;
+  if (!channelId) return [];
+  if (state.mentionChannel) {
+    try {
+      return (await api(`/api/c/${channelId}/members`)).members;
+    } catch {
+      return [];
+    }
+  }
+  return channelMembers();
+}
+
+function hideMentionBox() {
+  $('#mention-box').hidden = true;
+  mentionState.field = null;
+}
+
+function pickMention(user) {
+  const field = mentionState.field;
+  if (!field || !user) return;
+  const caret = field.selectionStart;
+  const before = field.value.slice(0, mentionState.start);
+  const after = field.value.slice(caret);
+  const insert = `@${user.username} `;
+  field.value = (before + insert + after).slice(0, field.maxLength > 0 ? field.maxLength : undefined);
+  const pos = before.length + insert.length;
+  field.setSelectionRange(pos, pos);
+  field.focus();
+  hideMentionBox();
+}
+
+function renderMentionBox() {
+  const box = $('#mention-box');
+  const { items, active, field } = mentionState;
+  if (!field || !items.length) return hideMentionBox();
+  box.replaceChildren(
+    ...items.map((u, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = i === active ? 'active' : '';
+      if (u.avatar) {
+        const img = document.createElement('img');
+        img.src = u.avatar;
+        img.alt = '';
+        b.append(img);
+      }
+      const name = document.createElement('span');
+      name.textContent = u.name;
+      const handle = document.createElement('span');
+      handle.className = 'muted';
+      handle.textContent = `@${u.username}`;
+      b.append(name, handle);
+      b.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        pickMention(u);
+      });
+      return b;
+    }),
+  );
+  const rect = field.getBoundingClientRect();
+  box.style.left = `${rect.left}px`;
+  box.style.top = `${rect.bottom + 4}px`;
+  box.style.width = `${Math.min(rect.width, 320)}px`;
+  box.hidden = false;
+}
+
+async function onMentionInput(e) {
+  const field = e.target;
+  const upto = field.value.slice(0, field.selectionStart);
+  const m = upto.match(/(?:^|\s)@([a-z0-9_.]{0,32})$/i);
+  if (!m) return hideMentionBox();
+  const query = m[1].toLowerCase();
+  const members = await mentionCandidates();
+  mentionState.field = field;
+  mentionState.start = upto.length - m[1].length - 1;
+  mentionState.items = members
+    .filter((u) => u.username && (u.username.toLowerCase().includes(query) || u.name.toLowerCase().includes(query)))
+    .slice(0, 8);
+  mentionState.active = 0;
+  renderMentionBox();
+}
+
+function onMentionKey(e) {
+  if ($('#mention-box').hidden || mentionState.field !== e.target) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const n = mentionState.items.length;
+    mentionState.active = (mentionState.active + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+    renderMentionBox();
+  } else if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    pickMention(mentionState.items[mentionState.active]);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    hideMentionBox();
+  }
+}
+
+for (const field of [$('#clip-title'), $('#clip-description')]) {
+  field.addEventListener('input', onMentionInput);
+  field.addEventListener('keydown', onMentionKey);
+  field.addEventListener('blur', () => setTimeout(hideMentionBox, 150));
+}
+
+// ---------------- perfil ----------------
+
+let profileData = null;
+let profileTab = 'streamed';
+
+async function showProfile(username) {
+  show('view-profile');
+  $('#profile-back').href = state.channel ? `/c/${state.channel.id}` : '/';
+  $('#profile-name').textContent = 'Carregando…';
+  $('#profile-username').textContent = `@${username}`;
+  $('#profile-channels').textContent = '';
+  $('#profile-clips').replaceChildren();
+  try {
+    profileData = await api(`/api/users/${encodeURIComponent(username)}`);
+  } catch (err) {
+    $('#profile-name').textContent = 'Perfil não encontrado';
+    $('#profile-channels').textContent = err.message;
+    return;
+  }
+  const { user, channels } = profileData;
+  document.title = `${user.name} • Faz o L`;
+  $('#profile-name').textContent = user.name;
+  $('#profile-avatar').src = user.avatar || '';
+  $('#profile-avatar').hidden = !user.avatar;
+  $('#profile-channels').textContent = channels.length ? `Canais em comum: ${channels.map((c) => c.name).join(', ')}` : '';
+  $('#count-streamed').textContent = `(${profileData.streamed.length})`;
+  $('#count-tagged').textContent = `(${profileData.tagged.length})`;
+  renderProfileTab();
+}
+
+function renderProfileTab() {
+  for (const tab of document.querySelectorAll('.tab')) tab.classList.toggle('active', tab.dataset.tab === profileTab);
+  const me = profileData.me;
+  const empty = profileTab === 'streamed'
+    ? (me ? 'Ninguém clipou suas lives ainda.' : 'Ninguém clipou as lives dessa pessoa ainda.')
+    : (me ? 'Ninguém te marcou em clipes ainda.' : 'Essa pessoa ainda não foi marcada em clipes.');
+  renderClipList($('#profile-clips'), profileData[profileTab], {
+    empty,
+    showChannel: true,
+    onChange: () => showProfile(profileData.user.username),
+  });
+}
+
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.addEventListener('click', () => {
+    profileTab = tab.dataset.tab;
+    if (profileData) renderProfileTab();
+  });
+}
+
+// ---------------- gerenciar canal (dono) ----------------
+
+$('#btn-manage').addEventListener('click', openManage);
+$('#manage-close').addEventListener('click', () => $('#dlg-manage').close());
+
+async function openManage() {
+  $('#manage-name').textContent = state.channel.name;
+  $('#dlg-manage').showModal();
+  loadInvites();
+  loadMembers();
+  loadDiscordChannels();
+}
+
+async function loadInvites() {
+  try {
+    const { invites } = await api(ch('/invites'));
+    const list = $('#invite-list');
+    if (!invites.length) {
+      list.innerHTML = '<li class="muted">Nenhum convite ativo.</li>';
+      return;
+    }
+    list.replaceChildren(
+      ...invites.map((inv) => {
+        const li = document.createElement('li');
+        const text = document.createElement('span');
+        text.className = 'grow';
+        const expires = inv.expiresAt ? `expira ${new Date(inv.expiresAt).toLocaleDateString('pt-BR')}` : 'não expira';
+        const uses = inv.maxUses ? `${inv.uses}/${inv.maxUses} usos` : `${inv.uses} usos`;
+        text.textContent = `${inv.url.replace(/^https?:\/\//, '')} • ${expires} • ${uses}`;
+        const copy = document.createElement('button');
+        copy.textContent = 'Copiar';
+        copy.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(inv.url);
+            toast('Link de convite copiado!');
+          } catch {
+            prompt('Copie o convite:', inv.url);
+          }
+        });
+        const revoke = document.createElement('button');
+        revoke.textContent = 'Revogar';
+        revoke.className = 'danger';
+        revoke.addEventListener('click', async () => {
+          await api(ch(`/invites/${inv.code}`), { method: 'DELETE' }).catch((err) => toast(err.message, true));
+          loadInvites();
+        });
+        li.append(text, copy, revoke);
+        return li;
+      }),
+    );
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+$('#btn-invite').addEventListener('click', async () => {
+  try {
+    const invite = await api(ch('/invites'), {
+      method: 'POST',
+      body: { days: Number($('#invite-days').value), maxUses: Number($('#invite-uses').value) || null },
+    });
+    await navigator.clipboard.writeText(invite.url).then(
+      () => toast('Convite criado e copiado! Cole no Discord.'),
+      () => toast('Convite criado.'),
+    );
+    loadInvites();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+async function loadMembers() {
+  state.members = null;
+  const members = await channelMembers();
+  $('#members-count').textContent = `(${members.length})`;
+  $('#member-list').replaceChildren(
+    ...members.map((m) => {
+      const li = document.createElement('li');
+      if (m.avatar) {
+        const img = document.createElement('img');
+        img.src = m.avatar;
+        img.alt = '';
+        li.append(img);
+      } else {
+        const span = document.createElement('span');
+        span.className = 'avatar';
+        span.textContent = m.name.slice(0, 1).toUpperCase();
+        li.append(span);
+      }
+      const name = document.createElement('span');
+      name.className = 'grow';
+      name.textContent = `${m.name}${m.username ? ` (@${m.username})` : ''}${m.role === 'owner' ? ' • dono' : ''}`;
+      li.append(name);
+      if (m.role !== 'owner') {
+        const remove = document.createElement('button');
+        remove.textContent = 'Remover';
+        remove.className = 'danger';
+        remove.addEventListener('click', async () => {
+          if (!confirm(`Remover ${m.name} do canal? A pessoa só volta com um convite novo.`)) return;
+          await api(ch(`/members/${m.id}`), { method: 'DELETE' }).catch((err) => toast(err.message, true));
+          loadMembers();
+        });
+        li.append(remove);
+      }
+      return li;
+    }),
+  );
+}
+
+async function loadDiscordChannels() {
+  const notify = $('#discord-notify');
+  const clips = $('#discord-clips');
+  try {
+    const data = await api(ch('/discord'));
+    const options = (selected, none) => [
+      new Option(none, ''),
+      ...data.textChannels.map((c) => new Option(`#${c.name}`, c.id, false, c.id === selected)),
+    ];
+    notify.replaceChildren(...options(data.notifyChannelId, 'Não avisar'));
+    clips.replaceChildren(...options(data.clipsChannelId, 'Mesmo canal dos avisos'));
+    notify.value = data.notifyChannelId;
+    clips.value = data.clipsChannelId;
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+for (const select of [$('#discord-notify'), $('#discord-clips')]) {
+  select.addEventListener('change', async () => {
+    try {
+      await api(ch('/discord'), {
+        method: 'PUT',
+        body: { notifyChannelId: $('#discord-notify').value, clipsChannelId: $('#discord-clips').value },
+      });
+      toast('Canais do Discord salvos.');
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
 }
 
 // ---------------- app desktop (Tauri) ----------------
@@ -892,7 +1522,7 @@ async function setupDesktop() {
       if (payload.state === 'error') toast(`Transmissão encerrada: ${payload.message}`, true);
       if (state.local?.native) {
         cleanupLocal();
-        api('/api/desktop/stop', { method: 'POST' }).catch(() => {});
+        api(ch('/desktop/stop'), { method: 'POST' }).catch(() => {});
         renderPresence();
       }
     }
@@ -904,7 +1534,7 @@ async function startNativeStream() {
   state.busy = true;
   renderPresence();
   try {
-    const { token, url } = await api('/api/desktop/token', { method: 'POST' });
+    const { token, url } = await api(ch('/desktop/token'), { method: 'POST' });
     await desktop.core.invoke('start_stream', {
       args: {
         url,
@@ -920,7 +1550,7 @@ async function startNativeStream() {
     });
     state.local = { native: true };
   } catch (err) {
-    await api('/api/desktop/stop', { method: 'POST' }).catch(() => {});
+    await api(ch('/desktop/stop'), { method: 'POST' }).catch(() => {});
     toast(typeof err === 'string' ? err : err.message || 'Não foi possível transmitir.', true);
   } finally {
     state.busy = false;
@@ -929,5 +1559,5 @@ async function startNativeStream() {
 }
 
 $('#build').textContent = `site ${SITE_VERSION}${desktop ? ' • app desktop' : ''}`;
-init().catch((err) => toast(err.message, true));
+route().catch((err) => toast(err.message, true));
 setupDesktop();
