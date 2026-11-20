@@ -71,19 +71,34 @@ export async function startBot() {
     });
   }
 
-  client.once(Events.ClientReady, async (c) => {
-    console.log(`[bot] Conectado como ${c.user.tag}`);
+  async function registerCommands() {
     try {
       if (guildId) {
-        await c.application.commands.set(commands, guildId);
+        await client.application.commands.set(commands, guildId);
       } else {
-        await c.application.commands.set(commands);
+        await client.application.commands.set(commands);
       }
       console.log('[bot] Comando /live registrado.');
     } catch (err) {
-      console.error('[bot] Falha ao registrar comandos:', err.message);
+      if (guildId && err.code === 50001) {
+        console.log('[bot] O bot ainda não está no servidor. Convide-o:');
+        console.log(`[bot]   https://discord.com/oauth2/authorize?client_id=${client.application.id}&scope=bot+applications.commands&permissions=19456`);
+      } else {
+        console.error('[bot] Falha ao registrar comandos:', err.message);
+      }
     }
+  }
+
+  client.once(Events.ClientReady, async (c) => {
+    console.log(`[bot] Conectado como ${c.user.tag}`);
+    await registerCommands();
     updatePresence().catch(() => {});
+  });
+
+  // Convidado pro servidor depois de ligado: registra o /live na hora, sem reiniciar
+  client.on(Events.GuildCreate, (guild) => {
+    console.log(`[bot] Entrou no servidor ${guild.name}`);
+    if (!guildId || guild.id === guildId) registerCommands();
   });
 
   client.on(Events.InteractionCreate, async (interaction) => {
