@@ -14,6 +14,7 @@ import {
 } from 'discord.js';
 import { config } from './config.js';
 import { allChannels, createInvite, discordBridge, getChannelByGuild, memberRole, updateGuildInfo } from './channels.js';
+import { sql } from './db.js';
 import { getRoomState, liveEvents } from './livekit.js';
 
 const COLOR_LIVE = 0xed4245;
@@ -229,9 +230,8 @@ export async function startBot() {
 
   // Cada clipe vai pro canal de clipes (ou de avisos); o link abre o vídeo embutido no Discord.
   // As pessoas marcadas com @ no título/descrição recebem a menção.
-  liveEvents.on('clip:published', async ({ channel, clip }) => {
-    const target = await textChannel(channel.clips_channel_id || channel.notify_channel_id);
-    if (!target) return;
+  /** Texto do post do clipe: título, quem clipou, descrição e link (com versão, pro Discord refazer a prévia). */
+  async function clipMessage(channel, clip, version = '') {
     const [streamer, creator] = await Promise.all([
       resolveName(channel.guild_id, clip.streamer_id, clip.streamer_name),
       resolveName(channel.guild_id, clip.creator_id, clip.creator_name),
@@ -249,15 +249,35 @@ export async function startBot() {
     const lines = [];
     if (clip.title) lines.push(`✂️ **${withMentions(clip.title)}**`, `${who} (${lengthLabel(clip.seconds)})`);
     else lines.push(`✂️ ${who} (${lengthLabel(clip.seconds)})`);
-    if (clip.description) lines.push(withMentions(clip.description));
-    lines.push(`${config.publicUrl}/clip/${clip.id}`);
+    // descrição em citação ("> " por linha), logo abaixo do título
+    if (clip.description) lines.push(...withMentions(clip.description).split('\n').map((l) => `> ${l}`));
+    const link = `${config.publicUrl}/clip/${clip.id}${version ? `?v=${version}` : ''}`;
+    const content = `${lines.join('\n').slice(0, 1990 - link.length)}\n${link}`;
+    return { content, allowedMentions: { users: [...discordIds.values()] } };
+  }
+
+  liveEvents.on('clip:published', async ({ channel, clip }) => {
+    const target = await textChannel(channel.clips_channel_id || channel.notify_channel_id);
+    if (!target) return;
     try {
-      await target.send({
-        content: lines.join('\n').slice(0, 2000),
-        allowedMentions: { users: [...discordIds.values()] },
-      });
+      const msg = await target.send(await clipMessage(channel, clip));
+      sql('UPDATE clips SET discord_message = ? WHERE id = ?').run(`${target.id}:${msg.id}`, clip.id);
     } catch (err) {
       console.error('[bot] Falha ao postar clipe:', err.message);
+    }
+  });
+
+  // Título/descrição editados depois de postar: edita a mensagem
+  liveEvents.on('clip:updated', async ({ channel, clip }) => {
+    const [channelId, messageId] = String(clip.discord_message || '').split(':');
+    if (!messageId) return;
+    try {
+      const target = await textChannel(channelId);
+      const msg = await target?.messages.fetch(messageId);
+      if (!msg) return;
+      await msg.edit({ ...(await clipMessage(channel, clip, Date.now().toString(36))), allowedMentions: { parse: [] } });
+    } catch (err) {
+      console.error('[bot] Falha ao atualizar post do clipe:', err.message);
     }
   });
 

@@ -124,6 +124,12 @@ function setDetails(clip, { title, description }) {
     sql('DELETE FROM clip_mentions WHERE clip_id = ?').run(clip.id);
     for (const user of mentioned) sql('INSERT OR IGNORE INTO clip_mentions (clip_id, user_id) VALUES (?, ?)').run(clip.id, user.id);
   });
+  // Já postado no Discord: atualiza o post com o título/descrição novos
+  if (clip.published && (cleanTitle !== clip.title || cleanDescription !== clip.description)) {
+    const channel = getChannel(clip.channel_id);
+    const updated = getClip(clip.id);
+    if (channel) liveEvents.emit('clip:updated', { channel, clip: { ...updated, mentions: mentionsOf(clip.id) } });
+  }
 }
 
 const escapeHtml = (s) =>

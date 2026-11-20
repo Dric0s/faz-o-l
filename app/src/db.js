@@ -81,6 +81,15 @@ CREATE TABLE IF NOT EXISTS clip_mentions (
 CREATE INDEX IF NOT EXISTS clip_mentions_user ON clip_mentions(user_id);
 `);
 
+// Migrações de colunas novas (ignora se já existir)
+for (const stmt of [
+  "ALTER TABLE clips ADD COLUMN discord_message TEXT", // "<canal>:<mensagem>" do post no Discord
+]) {
+  try {
+    db.exec(stmt);
+  } catch {}
+}
+
 /** Roda fn numa transação (tudo ou nada). */
 export function transaction(fn) {
   db.exec('BEGIN');

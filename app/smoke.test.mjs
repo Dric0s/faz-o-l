@@ -75,6 +75,12 @@ assert.deepEqual(edited.mentions.map((u) => u.username).sort(), ['amigo.legal', 
 // @nome de exibição vira o @ do Discord
 assert.equal(edited.description, 'olha isso @amigo.legal. e @estranho');
 assert.equal(sql('SELECT published FROM clips WHERE id = ?').get('clip1').published, 1);
+// Editar depois de postado avisa o bot para atualizar o post
+const { liveEvents } = await import('./src/livekit.js');
+const updated = new Promise((resolve) => liveEvents.once('clip:updated', resolve));
+await call(friend, 'PATCH', '/api/clips/clip1', { description: 'olha isso @Amigo. e @estranho!' });
+assert.equal((await updated).clip.description, 'olha isso @amigo.legal. e @estranho!');
+await call(friend, 'PATCH', '/api/clips/clip1', { description: 'olha isso @amigo.legal. e @estranho' });
 
 // Perfis
 const ownerProfile = (await call(friend, 'GET', '/api/users/dono')).json;
