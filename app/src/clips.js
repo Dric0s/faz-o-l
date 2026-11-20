@@ -175,12 +175,15 @@ export async function clipsRouter() {
 
   router.post('/api/c/:cid/clips', ...member, express.json(), async (req, res) => {
     const seconds = Number(req.body?.seconds);
-    const identity = String(req.body?.streamer || '');
+    const requested = String(req.body?.streamer || '');
     if (!ALLOWED_SECONDS.includes(seconds)) return res.status(400).json({ error: 'Duração inválida.' });
 
+    // Aceita a identidade exata ou o id do dono (a live do app desktop é "<id>:tela")
     const state = await getRoomState(req.channel);
-    const streamer = state.streamers.find((s) => s.identity === identity && s.live);
+    const live = state.streamers.filter((s) => s.live);
+    const streamer = live.find((s) => s.identity === requested) || live.find((s) => ownerOf(s.identity) === requested);
     if (!streamer) return res.status(404).json({ error: 'Essa live não está no ar.' });
+    const identity = streamer.identity;
 
     const id = crypto.randomBytes(9).toString('base64url');
     let made;
