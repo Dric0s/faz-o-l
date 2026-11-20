@@ -354,6 +354,6 @@ fn exe_name(pid: u32) -> Option<String> {
             return None;
         }
         let path = String::from_utf16_lossy(&buf[..len as usize]);
-        path.rsplit(['\', '/']).next().map(str::to_string)
+        path.rsplit(|c| c == '\\' || c == '/').next().map(str::to_string)
     }
 }
