@@ -174,7 +174,8 @@
           <h3>Clipes <span id="clips-count" class="muted"></span></h3>
           <p class="hint">Passe o mouse numa live e clique em <b>✂ Clipar</b>. Clipes não salvos somem em 24 h.</p>
           <p class="hint" id="hotkeys-hint" hidden>Atalhos (mesmo dentro do jogo): <b>Ctrl+F9</b> 30 s • <b>Ctrl+F10</b> 1 min • <b>Ctrl+F11</b> 3 min. Clipa a sua live, ou a que estiver em destaque.</p>
-          <ul id="clips" class="clips"></ul>
+          <button id="btn-clips" class="btn btn-block">🎬 Ver clipes</button>
+          <ul id="clips" class="clips clips-recent"></ul>
         </div>
 
         <div class="panel">
@@ -202,6 +203,30 @@
         <button type="submit" class="btn btn-primary">Publicar</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Clipes do canal: player grande + lista -->
+  <dialog id="dlg-clips" class="dialog dialog-wide">
+    <div class="clips-modal">
+      <div class="row-between clips-modal-head">
+        <h2>Clipes <span id="clips-modal-count" class="muted"></span></h2>
+        <div class="row nowrap">
+          <div id="clips-filter" class="seg">
+            <button data-filter="all" class="active">Todos</button>
+            <button data-filter="mine">Meus</button>
+            <button data-filter="saved">Salvos ⭐</button>
+          </div>
+          <button id="clips-close" class="btn btn-ghost btn-sm" aria-label="Fechar">✕</button>
+        </div>
+      </div>
+      <div class="clips-modal-body">
+        <div class="clips-player">
+          <video id="clips-player" controls playsinline></video>
+          <div id="clips-player-info" class="clips-player-info"></div>
+        </div>
+        <ul id="clips-modal-list" class="clips-side"></ul>
+      </div>
+    </div>
   </dialog>
 
   <!-- Gerenciar canal (dono) -->

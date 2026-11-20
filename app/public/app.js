@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-21.5';
+const SITE_VERSION = '2026-11-21.6';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -975,8 +975,9 @@ async function loadClips() {
   if (!state.me || !state.channel) return;
   try {
     const { clips } = await api(ch('/clips'));
-    $('#clips-count').textContent = clips.length ? `(${clips.length})` : '';
-    renderClipList($('#clips'), clips, { onChange: loadClips, empty: 'Nenhum clipe ainda.' });
+    clipsView.clips = clips;
+    renderClipsPanel(clips);
+    if ($('#dlg-clips').open) renderClipsDialog();
   } catch {
     /* sem clipes por enquanto */
   }
@@ -1015,7 +1016,7 @@ function personLink(person) {
   return a;
 }
 
-function clipCard(clip, { onChange, showChannel = false }) {
+function clipCard(clip, options) {
   const li = document.createElement('li');
   li.className = 'clip';
 
@@ -1025,6 +1026,12 @@ function clipCard(clip, { onChange, showChannel = false }) {
   video.controls = true;
   video.playsInline = true;
 
+  li.append(video, ...clipDetails(clip, options));
+  return li;
+}
+
+/** Título, descrição, informações e botões (copiar, baixar, editar, salvar, excluir). */
+function clipDetails(clip, { onChange, showChannel = false }) {
   const meta = document.createElement('div');
   meta.className = 'clip-meta';
   const title = document.createElement('div');
@@ -1106,9 +1113,135 @@ function clipCard(clip, { onChange, showChannel = false }) {
     actions.append(del);
   }
 
-  li.append(video, meta, actions);
+  return [meta, actions];
+}
+
+// ---------------- janela de clipes (player grande + lista) ----------------
+
+const clipsView = { clips: [], selected: null, filter: 'all' };
+
+function clipThumb(clip) {
+  const thumb = document.createElement('div');
+  thumb.className = 'clip-thumb';
+  const video = document.createElement('video');
+  video.src = `${clip.url}#t=0.5`; // primeiro quadro como miniatura
+  video.preload = 'metadata';
+  video.muted = true;
+  video.playsInline = true;
+  const len = document.createElement('span');
+  len.className = 'clip-len';
+  len.textContent = lengthLabel(clip.seconds);
+  thumb.append(video, len);
+  return thumb;
+}
+
+function clipRow(clip, onClick) {
+  const li = document.createElement('li');
+  li.className = 'clip-row';
+  li.tabIndex = 0;
+  const text = document.createElement('div');
+  text.className = 'clip-row-text';
+  const title = document.createElement('div');
+  title.className = 'clip-title';
+  title.textContent = clip.title || `Live de ${clip.streamer.name}`;
+  const info = document.createElement('div');
+  info.className = 'muted';
+  info.textContent = `${clip.title ? `${clip.streamer.name} • ` : ''}por ${clip.creator.name} • ${timeAgo(clip.createdAt)}${clip.saved ? ' • ⭐' : ''}`;
+  text.append(title, info);
+  li.append(clipThumb(clip), text);
+  li.addEventListener('click', onClick);
+  li.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') onClick();
+  });
   return li;
 }
+
+/** Painel lateral: botão + os 3 clipes mais recentes (abrem a janela grande). */
+function renderClipsPanel(clips) {
+  $('#clips-count').textContent = clips.length ? `(${clips.length})` : '';
+  $('#btn-clips').textContent = clips.length ? `🎬 Ver clipes (${clips.length})` : '🎬 Ver clipes';
+  const list = $('#clips');
+  if (!clips.length) {
+    const li = document.createElement('li');
+    li.className = 'empty-clips';
+    li.textContent = 'Nenhum clipe ainda.';
+    return list.replaceChildren(li);
+  }
+  list.replaceChildren(...clips.slice(0, 3).map((clip) => clipRow(clip, () => openClipsDialog(clip.id))));
+}
+
+function filteredClips() {
+  const { clips, filter } = clipsView;
+  if (filter === 'mine') return clips.filter((c) => c.mine);
+  if (filter === 'saved') return clips.filter((c) => c.saved);
+  return clips;
+}
+
+function selectClip(id, { autoplay = true } = {}) {
+  const clip = clipsView.clips.find((c) => c.id === id);
+  const player = $('#clips-player');
+  const info = $('#clips-player-info');
+  clipsView.selected = clip?.id || null;
+  for (const row of $('#clips-modal-list').children) row.classList.toggle('active', row.dataset.id === clipsView.selected);
+  if (!clip) {
+    player.removeAttribute('src');
+    player.load();
+    info.replaceChildren();
+    return;
+  }
+  if (player.dataset.clip !== clip.id) {
+    player.dataset.clip = clip.id;
+    player.src = clip.url;
+    if (autoplay) player.play().catch(() => {});
+  }
+  info.replaceChildren(...clipDetails(clip, { onChange: loadClips }));
+}
+
+function renderClipsDialog() {
+  const clips = filteredClips();
+  $('#clips-modal-count').textContent = `(${clips.length})`;
+  for (const b of $('#clips-filter').children) b.classList.toggle('active', b.dataset.filter === clipsView.filter);
+  const list = $('#clips-modal-list');
+  if (!clips.length) {
+    const li = document.createElement('li');
+    li.className = 'empty-clips';
+    li.textContent = clipsView.filter === 'all' ? 'Nenhum clipe ainda.' : 'Nenhum clipe aqui.';
+    list.replaceChildren(li);
+  } else {
+    list.replaceChildren(
+      ...clips.map((clip) => {
+        const row = clipRow(clip, () => selectClip(clip.id));
+        row.dataset.id = clip.id;
+        return row;
+      }),
+    );
+  }
+  const keep = clips.some((c) => c.id === clipsView.selected) ? clipsView.selected : clips[0]?.id;
+  selectClip(keep, { autoplay: false });
+}
+
+function openClipsDialog(id = null) {
+  if (id) {
+    clipsView.selected = id;
+    if (!filteredClips().some((c) => c.id === id)) clipsView.filter = 'all';
+  }
+  renderClipsDialog();
+  $('#dlg-clips').showModal();
+  if (id) $('#clips-player').play().catch(() => {});
+}
+
+$('#btn-clips').addEventListener('click', () => openClipsDialog());
+$('#clips-close').addEventListener('click', () => $('#dlg-clips').close());
+$('#dlg-clips').addEventListener('close', () => $('#clips-player').pause());
+$('#dlg-clips').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) e.currentTarget.close(); // clique fora fecha
+});
+$('#clips-filter').addEventListener('click', (e) => {
+  const filter = e.target.closest('button')?.dataset.filter;
+  if (!filter) return;
+  clipsView.filter = filter;
+  renderClipsDialog();
+});
 
 function renderClipList(list, clips, options) {
   if (!clips.length) {
