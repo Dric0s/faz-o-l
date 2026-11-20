@@ -23,6 +23,8 @@ const discord = {
   guildId: env.DISCORD_GUILD_ID || '',
   botToken: env.DISCORD_BOT_TOKEN || '',
   notifyChannelId: env.DISCORD_NOTIFY_CHANNEL_ID || '',
+  // Canal onde o bot posta o link de cada clipe (vazio = usa o canal de avisos)
+  clipsChannelId: env.DISCORD_CLIPS_CHANNEL_ID || '',
 };
 
 export const config = {

@@ -71,6 +71,19 @@ async function setPermission(identity, permission) {
 // O app desktop transmite como um participante separado: "<id do usuário>:tela"
 const DESKTOP_SUFFIX = ':tela';
 const isDesktop = (identity) => identity.endsWith(DESKTOP_SUFFIX);
+const ownerOf = (identity) => (isDesktop(identity) ? identity.slice(0, -DESKTOP_SUFFIX.length) : identity);
+
+// Nome de quem pegou token (o webhook do LiveKit às vezes chega sem o nome)
+const knownNames = new Map(); // id do usuário -> nome
+function rememberName(identity, name) {
+  if (name) knownNames.set(ownerOf(identity), name);
+}
+/** Nome pra mostrar: nunca o id cru nem o sufixo ":tela" do app desktop. */
+export function displayName(identity, name) {
+  if (name && name !== identity) return name;
+  return knownNames.get(ownerOf(identity)) || ownerOf(identity);
+}
+
 
 // Tokens do app desktop já emitidos, mas cujo participante ainda não entrou na sala
 const pendingDesktop = new Map(); // identity -> timestamp
@@ -92,7 +105,7 @@ function streamerIdentities(participants) {
 function slotsFull(participants) {
   const ids = streamerIdentities(participants);
   if (ids.size < config.maxStreamers) return null;
-  const names = [...ids].map((id) => participants.find((p) => p.identity === id)?.name || 'alguém').join(' e ');
+  const names = [...ids].map((id) => participants.find((p) => p.identity === id)?.name || knownNames.get(ownerOf(id)) || 'alguém').join(' e ');
   return { status: 409, error: `Já tem ${config.maxStreamers} pessoas transmitindo (${names}). Espere uma vaga.` };
 }
 
@@ -105,7 +118,7 @@ export async function getRoomState() {
   const participants = await listParticipants();
   const streamers = participants
     .filter((p) => p.permission?.canPublish || hasScreenShare(p))
-    .map((p) => ({ identity: p.identity, name: p.name || p.identity, live: hasScreenShare(p) }));
+    .map((p) => ({ identity: p.identity, name: displayName(p.identity, p.name), live: hasScreenShare(p) }));
   return {
     streamers,
     viewers: participants.length - streamers.length,
@@ -164,8 +177,9 @@ export function livekitRouter() {
         if (p && isScreenTrack(event.track) && !activeStreams.has(p.identity)) {
           pendingGrants.delete(p.identity);
           pendingDesktop.delete(p.identity);
-          activeStreams.set(p.identity, p.name || p.identity);
-          liveEvents.emit('stream:start', { identity: p.identity, name: p.name || p.identity });
+          const name = displayName(p.identity, p.name);
+          activeStreams.set(p.identity, name);
+          liveEvents.emit('stream:start', { identity: p.identity, name });
         }
         break;
       case 'track_unpublished':
@@ -212,6 +226,9 @@ export function livekitRouter() {
       return res.status(503).json({ error: 'Servidor de vídeo indisponível. Tente novamente.' });
     }
 
+    rememberName(user.id, user.name);
+
+    rememberName(user.id, user.name);
     const at = new AccessToken(apiKey, apiSecret, {
       identity: user.id,
       name: user.name,
@@ -280,6 +297,9 @@ export function livekitRouter() {
         maxParticipants: config.maxViewers + config.maxStreamers,
       });
 
+      rememberName(user.id, user.name);
+
+      rememberName(user.id, user.name);
       const at = new AccessToken(apiKey, apiSecret, {
         identity,
         name: user.name,

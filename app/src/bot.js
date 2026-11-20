@@ -43,7 +43,7 @@ async function statusEmbed() {
 }
 
 export async function startBot() {
-  const { botToken, guildId, notifyChannelId } = config.discord;
+  const { botToken, guildId, notifyChannelId, clipsChannelId } = config.discord;
   if (!botToken) {
     console.log('[bot] DISCORD_BOT_TOKEN não definido — bot desativado.');
     return;
@@ -110,19 +110,61 @@ export async function startBot() {
     }
   });
 
-  async function notifyChannel() {
-    if (!notifyChannelId || !client.isReady()) return null;
+  async function textChannel(id, label) {
+    if (!id || !client.isReady()) return null;
     try {
-      const channel = await client.channels.fetch(notifyChannelId);
+      const channel = await client.channels.fetch(id);
       return channel?.isTextBased() ? channel : null;
     } catch (err) {
-      console.error('[bot] Canal de avisos inválido:', err.message);
+      console.error(`[bot] Canal de ${label} inválido:`, err.message);
       return null;
     }
   }
+  const notifyChannel = () => textChannel(notifyChannelId, 'avisos');
 
-  liveEvents.on('stream:start', async ({ identity, name }) => {
+  /**
+   * Nome de exibição no Discord. Se só tivermos o id (identity "d<id>" ou
+   * "d<id>:tela"), busca o usuário no servidor: apelido > nome global > username.
+   */
+  async function resolveName(identity, name) {
+    const match = /^d(\d+)(?::tela)?$/.exec(identity || '');
+    if (!match || (name && name !== identity && name !== identity.replace(/:tela$/, ''))) return name;
+    const userId = match[1];
+    try {
+      if (guildId) {
+        const member = await client.guilds.cache.get(guildId)?.members.fetch(userId);
+        if (member) return member.displayName;
+      }
+      const user = await client.users.fetch(userId);
+      return user.globalName || user.username;
+    } catch {
+      return name || 'alguém';
+    }
+  }
+
+  // Cada clipe novo vai pro canal de clipes; o link abre o vídeo embutido no Discord
+  liveEvents.on('clip:created', async (clip) => {
+    const channel = await textChannel(clipsChannelId || notifyChannelId, 'clipes');
+    if (!channel) return;
+    const [streamer, creator] = await Promise.all([
+      resolveName(clip.streamerIdentity, clip.streamerName),
+      resolveName(clip.creatorId, clip.creatorName),
+    ]);
+    const length = clip.seconds >= 60 ? `${clip.seconds / 60} min` : `${clip.seconds} s`;
+    const who = creator === streamer ? `**${creator}** clipou a própria live` : `**${creator}** clipou a live de **${streamer}**`;
+    try {
+      await channel.send({
+        content: `✂️ ${who} (${length})\n${config.publicUrl}/clip/${clip.id}`,
+        allowedMentions: { parse: [] },
+      });
+    } catch (err) {
+      console.error('[bot] Falha ao postar clipe:', err.message);
+    }
+  });
+
+  liveEvents.on('stream:start', async ({ identity, name: rawName }) => {
     updatePresence().catch(() => {});
+    const name = await resolveName(identity, rawName);
     const channel = await notifyChannel();
     if (!channel) return;
     const embed = new EmbedBuilder()
@@ -139,11 +181,12 @@ export async function startBot() {
     }
   });
 
-  liveEvents.on('stream:end', async ({ identity, name }) => {
+  liveEvents.on('stream:end', async ({ identity, name: rawName }) => {
     updatePresence().catch(() => {});
     const msg = notifications.get(identity);
     if (!msg) return;
     notifications.delete(identity);
+    const name = await resolveName(identity, rawName);
     const embed = new EmbedBuilder()
       .setColor(COLOR_ENDED)
       .setTitle(`${name} encerrou a transmissão`)
