@@ -8,6 +8,7 @@
 mod headless;
 mod server;
 mod stream;
+mod updater;
 
 /// Modo de teste sem janela (`--test-stream`). Retorna o código de saída.
 pub fn run_test_stream(args: &[String]) -> i32 {
@@ -23,9 +24,12 @@ mod hwenc;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(stream::StreamState::default())
+        .manage(updater::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             server::app_version,
+            updater::update_status,
             server::get_server,
             server::set_server,
             stream::list_monitors,
@@ -35,6 +39,7 @@ pub fn run() {
         ])
         .setup(|app| {
             server::open_main_window(app.handle())?;
+            updater::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -43,6 +43,12 @@ pub struct Session {
 #[derive(Default)]
 pub struct StreamState(Mutex<Option<Session>>);
 
+impl StreamState {
+    pub async fn is_active(&self) -> bool {
+        self.0.lock().await.is_some()
+    }
+}
+
 fn emit_state(app: &AppHandle, state: &str, message: Option<String>, encoder: Option<String>) {
     let _ = app.emit("stream-state", json!({ "state": state, "message": message, "encoder": encoder }));
 }

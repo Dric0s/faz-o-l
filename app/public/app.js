@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-20.4';
+const SITE_VERSION = '2026-11-20.5';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -825,7 +825,20 @@ async function setupDesktop() {
   if (!desktop) return;
   try {
     const version = await desktop.core.invoke('app_version');
-    $('#build').textContent = `site ${SITE_VERSION} • app ${version}`;
+    const base = `site ${SITE_VERSION} • app ${version}`;
+    $('#build').textContent = base;
+    // Atualização automática: o app avisa aqui enquanto baixa/instala a versão nova
+    const UPDATE_TEXT = {
+      downloading: (v) => `baixando a versão ${v}…`,
+      waiting: (v) => `versão ${v} pronta: instala quando você parar de transmitir`,
+      installing: (v) => `instalando a versão ${v}, o app vai reabrir…`,
+    };
+    const showUpdate = (s) => {
+      const text = s && UPDATE_TEXT[s.state]?.(s.version);
+      $('#build').textContent = text ? `${base} • ${text}` : base;
+    };
+    desktop.core.invoke('update_status').then(showUpdate).catch(() => {});
+    desktop.event.listen('update-state', (e) => showUpdate(e.payload)).catch(() => {});
   } catch {
     $('#build').textContent = `site ${SITE_VERSION} • app antigo (baixe a versão nova)`;
   }
