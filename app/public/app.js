@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-21.6';
+const SITE_VERSION = '2026-11-22.2';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -297,6 +297,7 @@ async function showChannel(id) {
   $('#btn-manage').hidden = c.role !== 'owner';
   $('#btn-profile').href = profileHref(state.me.username);
   $('#btn-profile').toggleAttribute('data-link', !!state.me.username);
+  setIcon($('#hud-avatar'), null, state.me.avatar);
 
   show('view-join');
   $('#join-name').textContent = state.me.name;
@@ -336,7 +337,30 @@ $('#btn-leave').addEventListener('click', async () => {
   show('view-join');
   refreshJoinStatus();
 });
-$('#btn-sidebar').addEventListener('click', () => $('#sidebar').classList.toggle('collapsed'));
+// Gaveta da direita: um painel por vez (Transmitir / Na sala)
+const PANEL_TITLES = { stream: 'Transmitir', people: 'Na sala' };
+function openPanel(name, { toggle = false } = {}) {
+  const drawer = $('#sidebar');
+  const current = drawer.hidden ? null : drawer.dataset.panel;
+  const next = toggle && name === current ? null : name;
+  drawer.hidden = !next;
+  $('#shell').classList.toggle('drawer-open', !!next);
+  if (next) {
+    drawer.dataset.panel = next;
+    $('#drawer-title').textContent = PANEL_TITLES[next];
+    for (const p of drawer.querySelectorAll('.panel')) p.hidden = p.dataset.panel !== next;
+  }
+  for (const b of document.querySelectorAll('.rail-btn[data-panel]')) b.classList.toggle('active', b.dataset.panel === next);
+  store.set('room-panel', next || '');
+}
+for (const b of document.querySelectorAll('.rail-btn[data-panel]')) {
+  b.addEventListener('click', () => openPanel(b.dataset.panel, { toggle: true }));
+}
+for (const b of document.querySelectorAll('[data-open-panel]')) {
+  b.addEventListener('click', () => openPanel(b.dataset.openPanel));
+}
+$('#drawer-close').addEventListener('click', () => openPanel(null));
+$('#rail-clips').addEventListener('click', () => openClipsDialog());
 
 async function join() {
   const btn = $('#btn-join');
@@ -360,6 +384,8 @@ async function join() {
     await room.startAudio().catch(() => {});
 
     show('view-room');
+    // Reabre o último painel (na 1ª vez, "Transmitir" em tela grande)
+    openPanel(store.get('room-panel', innerWidth > 1100 ? 'stream' : '') || null);
     renderPresence();
     startClipsRefresh();
   } catch (err) {
@@ -449,11 +475,10 @@ function onTrackSubscribed(track, publication, participant) {
     updateResolution(tile, track);
   } else if (track.source === Track.Source.ScreenShareAudio && track.kind === Track.Kind.Audio) {
     const tile = ensureTile(participant.identity, tileName);
-    // Som da própria live começa mudo: no mesmo PC, o app capturaria esse som de volta (eco)
+    // Toda live começa muda (a sua, no mesmo PC, ainda daria eco se desmutar)
     if (ownAppStream && !tile.ownAudioWarned) {
       tile.ownAudioWarned = true;
-      tile.muted = true;
-      toast('O som da sua live começa mudo (no mesmo PC daria eco). Clique em 🔇 pra ouvir.');
+      toast('O som da sua live está mudo (no mesmo PC daria eco).');
     }
     tile.audioTrack = track;
     const el = track.attach();
@@ -472,6 +497,7 @@ function onTrackUnsubscribed(track, publication, participant) {
     removeTile(participant.identity);
   } else {
     tile.audioTrack = null;
+    applyVolume(tile);
   }
   renderPresence();
 }
@@ -491,7 +517,7 @@ function ensureTile(id, name, isLocal = false) {
     publication: null,
     audioTrack: null,
     volume: Number(store.get(`vol:${id}`, '1')),
-    muted: false,
+    muted: true, // toda live começa sem som: quem assiste desmuta
     quality: store.get('quality', 'high'),
   };
   el.querySelector('.tile-name').textContent = isLocal ? `${name} (você)` : name;
@@ -521,6 +547,13 @@ function ensureTile(id, name, isLocal = false) {
   });
   mute.addEventListener('click', () => {
     tile.muted = !tile.muted;
+    applyVolume(tile);
+  });
+  el.querySelector('.tile-unmute').addEventListener('click', (e) => {
+    e.stopPropagation();
+    tile.muted = false;
+    if (tile.volume === 0) tile.volume = 1;
+    volume.value = String(tile.volume);
     applyVolume(tile);
   });
   quality.addEventListener('change', () => {
@@ -582,11 +615,13 @@ function layout() {
     tile.el.classList.toggle('is-focus', state.focus === tile.id);
     applyQuality(tile);
   }
+  updateClipPills();
 }
 
 function applyVolume(tile) {
   const mute = tile.el.querySelector('.ctl-mute');
   mute.textContent = tile.muted || tile.volume === 0 ? '🔇' : '🔊';
+  tile.el.querySelector('.tile-unmute').hidden = !(tile.audioTrack && (tile.muted || tile.volume === 0));
   tile.audioTrack?.setVolume(tile.muted ? 0 : tile.volume);
 }
 
@@ -669,7 +704,8 @@ function renderPresence() {
   $('#live-count').textContent = `${streamers.length}/${maxStreamers} ao vivo`;
   $('#pill-live').classList.toggle('on', streamers.length > 0);
   $('#viewer-count').textContent = `${viewers}/${maxViewers}`;
-  $('#people-count').textContent = `(${all.length})`;
+  $('#people-count').textContent = String(all.length);
+  updateClipPills();
 
   const free = maxStreamers - streamers.length;
   const btn = $('#btn-stream');
@@ -1156,18 +1192,42 @@ function clipRow(clip, onClick) {
   return li;
 }
 
-/** Painel lateral: botão + os 3 clipes mais recentes (abrem a janela grande). */
+/** Linha do tempo na base da sala: miniaturas dos clipes recentes (abrem a janela grande). */
 function renderClipsPanel(clips) {
-  $('#clips-count').textContent = clips.length ? `(${clips.length})` : '';
-  $('#btn-clips').textContent = clips.length ? `🎬 Ver clipes (${clips.length})` : '🎬 Ver clipes';
+  $('#clips-count').textContent = clips.length ? String(clips.length) : '';
+  $('#btn-clips').textContent = clips.length ? `Ver todos (${clips.length})` : 'Ver todos';
   const list = $('#clips');
   if (!clips.length) {
     const li = document.createElement('li');
-    li.className = 'empty-clips';
-    li.textContent = 'Nenhum clipe ainda.';
+    li.className = 'tl-empty';
+    li.textContent = 'Nenhum clipe ainda — use os botões ao lado ou os atalhos.';
     return list.replaceChildren(li);
   }
-  list.replaceChildren(...clips.slice(0, 3).map((clip) => clipRow(clip, () => openClipsDialog(clip.id))));
+  // Mantém as miniaturas já carregadas (a lista recarrega a cada 30 s)
+  const old = new Map([...list.children].map((li) => [li.dataset.id, li]));
+  list.replaceChildren(
+    ...clips.slice(0, 20).map((clip) => {
+      const key = `${clip.id}|${clip.title}`;
+      const existing = old.get(clip.id);
+      if (existing?.dataset.key === key) return existing;
+      const li = document.createElement('li');
+      li.className = 'tl-clip';
+      li.tabIndex = 0;
+      li.dataset.id = clip.id;
+      li.dataset.key = key;
+      li.title = clip.title || `Live de ${clip.streamer.name}`;
+      const thumb = clipThumb(clip);
+      const title = document.createElement('span');
+      title.className = 'tl-title';
+      title.textContent = li.title;
+      li.append(...thumb.childNodes, title);
+      li.addEventListener('click', () => openClipsDialog(clip.id));
+      li.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') openClipsDialog(clip.id);
+      });
+      return li;
+    }),
+  );
 }
 
 function filteredClips() {
@@ -1714,14 +1774,37 @@ async function setupDesktop() {
 }
 
 let hotkeyBusy = false;
+
+/** Qual live clipar: a sua (se estiver transmitindo), senão a em destaque, senão a única aberta. */
+function clipTarget() {
+  if (!state.room) return null;
+  if (state.local || myAppStream()) return state.me.id;
+  let id = null;
+  if (state.focus && state.tiles.has(state.focus)) id = state.focus;
+  else if (state.tiles.size === 1) id = [...state.tiles.keys()][0];
+  return id === '__local__' ? state.me.id : id;
+}
+
+// Botões de clipe na base da sala (abrem o diálogo de título, como o ✂ da live)
+$('#clip-pills').addEventListener('click', (e) => {
+  const seconds = Number(e.target.closest('button')?.dataset.seconds);
+  if (!seconds) return;
+  const streamer = clipTarget();
+  if (!streamer) return toast('Coloque uma live em destaque (⤢) para escolher qual clipar.', true);
+  createClip(streamer, seconds);
+});
+function updateClipPills() {
+  const anyLive = state.tiles.size > 0 || !!state.local || !!myAppStream();
+  const target = clipTarget();
+  for (const b of $('#clip-pills').querySelectorAll('button')) b.disabled = !anyLive;
+  $('#clip-pills').classList.toggle('ready', !!target);
+  $('#clip-pills').title = !anyLive
+    ? 'Ninguém ao vivo pra clipar'
+    : target ? 'Clipar os últimos segundos' : 'Coloque uma live em destaque (⤢) para escolher qual clipar';
+}
 async function hotkeyClip(seconds) {
   if (!state.room || hotkeyBusy) return;
-  // Alvo: a sua live (se estiver transmitindo), senão a live em destaque, senão a única aberta
-  let streamer = null;
-  if (state.local) streamer = state.me.id;
-  else if (state.focus && state.tiles.has(state.focus)) streamer = state.focus;
-  else if (state.tiles.size === 1) streamer = [...state.tiles.keys()][0];
-  if (streamer === '__local__') streamer = state.me.id;
+  const streamer = clipTarget();
   if (!streamer) return toast('Atalho de clipe: coloque uma live em destaque (⤢) para saber qual clipar.', true);
   hotkeyBusy = true;
   toast(`✂ Gerando clipe dos últimos ${lengthLabel(seconds)}…`);

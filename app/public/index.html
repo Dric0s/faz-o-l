@@ -5,8 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Faz o L</title>
   <meta name="description" content="Transmita sua tela para a galera do Discord com quase zero de delay." />
-  <meta name="theme-color" content="#111214" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%23ed4245'/><path d='M22 14h8v28h14v8H22z' fill='white'/></svg>" />
+  <meta name="theme-color" content="#0d0e0b" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='20' fill='%23e3f26a'/><path d='M22 14h8v28h14v8H22z' fill='%23141505'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -95,36 +98,61 @@
 
   <!-- Sala -->
   <section id="view-room" class="view room" hidden>
-    <header class="topbar">
-      <div class="brand">
-        <img id="room-icon" class="guild-icon" alt="" hidden />
-        <div id="room-logo" class="logo"><span>L</span></div>
-        <strong id="room-name">Faz o L</strong>
-      </div>
-      <div class="stats">
-        <span class="pill" id="pill-live"><i class="dot"></i><span id="live-count">0/2 ao vivo</span></span>
-        <span class="pill" id="pill-viewers">👀 <span id="viewer-count">0/15</span></span>
-      </div>
-      <div class="topbar-right">
-        <button id="btn-manage" class="btn btn-ghost btn-sm" title="Convites e membros" hidden>⚙ Canal</button>
-        <a id="btn-profile" class="btn btn-ghost btn-sm" title="Meu perfil" href="#">👤</a>
-        <button id="btn-sidebar" class="btn btn-ghost btn-sm" title="Pessoas na sala">👥</button>
-        <button id="btn-leave" class="btn btn-ghost btn-sm">Sair</button>
-      </div>
-    </header>
-
-    <main class="main">
+    <div class="shell" id="shell">
       <div id="stage" class="stage count-0">
         <div id="empty" class="empty">
-          <div class="empty-icon">📺</div>
-          <h2>Ninguém transmitindo ainda</h2>
-          <p class="muted">Clique em <b>Transmitir minha tela</b> e chame a galera.</p>
+          <div class="empty-orb"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2"/></svg></div>
+          <h2>Ninguém ao vivo ainda</h2>
+          <p class="muted">Abra <b>Transmitir</b> e chame a galera.</p>
+          <button type="button" class="btn btn-primary" data-open-panel="stream">Transmitir minha tela</button>
         </div>
       </div>
 
-      <aside id="sidebar" class="sidebar">
-        <div class="panel">
-          <h3>Transmitir</h3>
+      <!-- topo flutuante -->
+      <header class="hud-top">
+        <button id="btn-leave" class="icon-btn glass" title="Sair da sala" aria-label="Sair da sala">
+          <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="hud-center">
+          <div class="pill glass brand-pill">
+            <img id="room-icon" class="guild-icon" alt="" hidden />
+            <div id="room-logo" class="logo"><span>L</span></div>
+            <strong id="room-name">Faz o L</strong>
+          </div>
+          <span class="pill glass" id="pill-live"><i class="dot"></i><span id="live-count">0/2 ao vivo</span></span>
+          <span class="pill glass" id="pill-viewers" title="Assistindo"><svg viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><span id="viewer-count">0/15</span></span>
+        </div>
+        <a id="btn-profile" class="icon-btn glass avatar-btn" title="Meu perfil" href="#"><img id="hud-avatar" alt="" hidden /><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></a>
+      </header>
+
+      <!-- barra lateral de ícones -->
+      <nav class="rail glass" aria-label="Ferramentas">
+        <button class="rail-btn" data-panel="stream" title="Transmitir"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4"/></svg></button>
+        <button class="rail-btn" id="rail-clips" title="Clipes"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"/></svg><span id="clips-count" class="rail-badge"></span></button>
+        <button class="rail-btn" data-panel="people" title="Na sala"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></svg><span id="people-count" class="rail-badge"></span></button>
+        <button id="btn-manage" class="rail-btn" title="Canal: convites e membros" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+      </nav>
+
+      <!-- base: clipar + clipes recentes (tipo linha do tempo) -->
+      <div class="dock">
+        <div class="clip-pills glass" id="clip-pills" title="Clipar a sua live ou a live em destaque">
+          <span class="clip-pills-label"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"/></svg>Clipar</span>
+          <button data-seconds="30">30s</button>
+          <button data-seconds="60">1 min</button>
+          <button data-seconds="180">3 min</button>
+        </div>
+        <div class="timeline glass">
+          <ul id="clips" class="timeline-strip"></ul>
+          <button id="btn-clips" class="timeline-all" title="Ver todos os clipes">Ver todos</button>
+        </div>
+      </div>
+
+      <aside id="sidebar" class="drawer glass" hidden>
+        <div class="drawer-head">
+          <h3 id="drawer-title">Transmitir</h3>
+          <button id="drawer-close" class="icon-btn sm" aria-label="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+        </div>
+        <div class="panel" data-panel="stream">
           <label class="field">Qualidade
             <select id="opt-quality">
               <option value="1080p60">1080p • 60 fps</option>
@@ -167,23 +195,15 @@
           <p class="hint" id="browser-audio-hint">No Windows, marque <b>“Compartilhar áudio do sistema”</b> ao escolher a tela. Em aba do Chrome, marque <b>“Compartilhar áudio da guia”</b>.</p>
           <button id="btn-stream" class="btn btn-live btn-block">Transmitir minha tela</button>
           <p id="slots" class="hint center-text"></p>
+          <p class="hint" id="hotkeys-hint" hidden>Atalhos de clipe (mesmo dentro do jogo): <kbd>Ctrl+F9</kbd> 30 s • <kbd>Ctrl+F10</kbd> 1 min • <kbd>Ctrl+F11</kbd> 3 min.</p>
           <p id="build" class="hint center-text"></p>
         </div>
 
-        <div class="panel">
-          <h3>Clipes <span id="clips-count" class="muted"></span></h3>
-          <p class="hint">Passe o mouse numa live e clique em <b>✂ Clipar</b>. Clipes não salvos somem em 24 h.</p>
-          <p class="hint" id="hotkeys-hint" hidden>Atalhos (mesmo dentro do jogo): <b>Ctrl+F9</b> 30 s • <b>Ctrl+F10</b> 1 min • <b>Ctrl+F11</b> 3 min. Clipa a sua live, ou a que estiver em destaque.</p>
-          <button id="btn-clips" class="btn btn-block">🎬 Ver clipes</button>
-          <ul id="clips" class="clips clips-recent"></ul>
-        </div>
-
-        <div class="panel">
-          <h3>Na sala <span id="people-count" class="muted"></span></h3>
+        <div class="panel" data-panel="people">
           <ul id="people" class="people"></ul>
         </div>
       </aside>
-    </main>
+    </div>
   </section>
 
   <!-- Título e descrição do clipe -->
@@ -275,14 +295,17 @@
     <div class="tile">
       <video playsinline autoplay muted></video>
       <div class="tile-loading">Conectando…</div>
+      <button class="tile-unmute" hidden>🔇 Ativar som</button>
       <div class="tile-top">
         <span class="badge-live">AO VIVO</span>
         <span class="tile-name"></span>
         <span class="tile-res muted"></span>
       </div>
       <div class="tile-controls">
-        <button class="ctl ctl-mute" title="Mutar/desmutar">🔊</button>
-        <input class="ctl-volume" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+        <div class="ctl-group">
+          <button class="ctl ctl-mute" title="Mutar/desmutar">🔊</button>
+          <input class="ctl-volume" type="range" min="0" max="1" step="0.01" value="1" title="Volume" />
+        </div>
         <select class="ctl-quality" title="Qualidade">
           <option value="high">Original</option>
           <option value="low">Economia</option>
