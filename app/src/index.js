@@ -5,6 +5,7 @@ import express from 'express';
 import { config } from './config.js';
 import { authRouter, sessionMiddleware } from './auth.js';
 import { livekitRouter } from './livekit.js';
+import { clipsRouter } from './clips.js';
 import { startBot } from './bot.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,7 @@ app.get('/healthz', (_req, res) => res.send('ok'));
 app.use(sessionMiddleware);
 app.use(authRouter());
 app.use(livekitRouter());
+app.use(await clipsRouter());
 
 app.get('/api/me', (req, res) => {
   res.json({

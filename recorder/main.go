@@ -1,0 +1,537 @@
+// Faz o L — gravador de clipes.
+//
+// Entra na sala escondido, recebe cada live (tela + áudio da tela) e repassa os
+// pacotes RTP, sem decodificar, para um ffmpeg local que salva pedaços de ~4 s
+// em Matroska (-c copy). Mantém só os últimos minutos. Quando o site pede um
+// clipe, junta os pedaços que cobrem os últimos N segundos num MP4/WebM.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/livekit"
+	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/rtcp"
+	"github.com/pion/webrtc/v4"
+)
+
+const (
+	identityRecorder = "fazol-recorder"
+	segmentSeconds   = 4
+	keyframeEvery    = 3 * time.Second
+	keepBuffer       = 210 * time.Second // ~3,5 min (clipe máximo de 2 min + folga)
+	restartDebounce  = 1500 * time.Millisecond
+)
+
+var (
+	livekitURL = env("LIVEKIT_WS_URL", "ws://fazol-livekit:7880")
+	apiKey     = os.Getenv("LIVEKIT_API_KEY")
+	apiSecret  = os.Getenv("LIVEKIT_API_SECRET")
+	roomName   = env("ROOM_NAME", "faz-o-l")
+	bufferDir  = env("BUFFER_DIR", "/data/buffer")
+	clipsDir   = env("CLIPS_DIR", "/data/clips")
+	listenAddr = env("LISTEN", ":8090")
+
+	nextPort atomic.Int32
+	mu       sync.Mutex
+	records  = map[string]*recording{} // identidade -> gravação
+)
+
+func env(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ---------------------------------------------------------------------------
+// Gravação de uma live
+// ---------------------------------------------------------------------------
+
+type forward struct {
+	track *webrtc.TrackRemote
+	rp    *lksdk.RemoteParticipant
+	port  int // RTP; RTCP vai em port+1
+	rtp   *net.UDPConn
+	rtcp  *net.UDPConn
+	stop  chan struct{}
+}
+
+type segment struct {
+	path  string
+	start time.Time
+}
+
+type recording struct {
+	identity string
+	dir      string
+
+	mu        sync.Mutex
+	video     *forward
+	audio     *forward
+	videoMime string
+	cmd       *exec.Cmd
+	run       int
+	restart   *time.Timer
+	segments  []segment
+	seen      map[string]bool
+}
+
+var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+func getRecording(identity string) *recording {
+	mu.Lock()
+	defer mu.Unlock()
+	rec := records[identity]
+	if rec == nil {
+		dir := filepath.Join(bufferDir, unsafeChars.ReplaceAllString(identity, "_"))
+		_ = os.MkdirAll(dir, 0o755)
+		rec = &recording{identity: identity, dir: dir, seen: map[string]bool{}}
+		records[identity] = rec
+	}
+	return rec
+}
+
+func allocPort() int {
+	p := 30000 + int(nextPort.Add(2))%20000
+	return p - p%2 // RTP par, RTCP ímpar
+}
+
+func dialUDP(port int) *net.UDPConn {
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		log.Printf("udp %d: %v", port, err)
+		return nil
+	}
+	return conn
+}
+
+func (rec *recording) addTrack(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+	port := allocPort()
+	fw := &forward{track: track, rp: rp, port: port, rtp: dialUDP(port), rtcp: dialUDP(port + 1), stop: make(chan struct{})}
+
+	rec.mu.Lock()
+	if track.Kind() == webrtc.RTPCodecTypeVideo {
+		if rec.video != nil {
+			close(rec.video.stop)
+		}
+		rec.video = fw
+		rec.videoMime = strings.ToLower(track.Codec().MimeType)
+	} else {
+		if rec.audio != nil {
+			close(rec.audio.stop)
+		}
+		rec.audio = fw
+	}
+	rec.scheduleRestart()
+	rec.mu.Unlock()
+
+	// Relatórios RTCP (Sender Report) -> ffmpeg, pra sincronizar áudio e vídeo
+	pub.OnRTCP(func(pkt rtcp.Packet) {
+		if sr, ok := pkt.(*rtcp.SenderReport); ok && fw.rtcp != nil {
+			if raw, err := sr.Marshal(); err == nil {
+				_, _ = fw.rtcp.Write(raw)
+			}
+		}
+	})
+
+	// Quadro-chave a cada poucos segundos: cada pedaço começa num quadro inteiro
+	if track.Kind() == webrtc.RTPCodecTypeVideo {
+		go func() {
+			ticker := time.NewTicker(keyframeEvery)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-fw.stop:
+					return
+				case <-ticker.C:
+					rp.WritePLI(track.SSRC())
+				}
+			}
+		}()
+	}
+
+	// Pacotes RTP crus -> ffmpeg
+	go func() {
+		buf := make([]byte, 1600)
+		for {
+			n, _, err := track.Read(buf)
+			if err != nil {
+				return
+			}
+			select {
+			case <-fw.stop:
+				return
+			default:
+			}
+			if fw.rtp != nil {
+				_, _ = fw.rtp.Write(buf[:n])
+			}
+		}
+	}()
+}
+
+func (rec *recording) removeTrack(track *webrtc.TrackRemote) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.video != nil && rec.video.track == track {
+		close(rec.video.stop)
+		rec.video = nil
+	}
+	if rec.audio != nil && rec.audio.track == track {
+		close(rec.audio.stop)
+		rec.audio = nil
+	}
+	if rec.video == nil {
+		rec.stopFFmpeg() // sem vídeo, sem gravação (os pedaços continuam valendo pra clipar)
+	} else {
+		rec.scheduleRestart()
+	}
+}
+
+// (Re)inicia o ffmpeg com as trilhas atuais, esperando um pouco pra juntar vídeo e áudio.
+func (rec *recording) scheduleRestart() {
+	if rec.restart != nil {
+		rec.restart.Stop()
+	}
+	rec.restart = time.AfterFunc(restartDebounce, func() {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		rec.stopFFmpeg()
+		if rec.video != nil {
+			rec.startFFmpeg()
+		}
+	})
+}
+
+func encodingName(mime string) string {
+	parts := strings.SplitN(mime, "/", 2)
+	if len(parts) != 2 {
+		return mime
+	}
+	return strings.ToUpper(parts[1])
+}
+
+func mediaLine(kind string, fw *forward) string {
+	c := fw.track.Codec()
+	pt := uint8(fw.track.PayloadType())
+	rtpmap := fmt.Sprintf("%s/%d", encodingName(c.MimeType), c.ClockRate)
+	if kind == "audio" {
+		rtpmap = fmt.Sprintf("opus/%d/%d", c.ClockRate, max(int(c.Channels), 2))
+	}
+	line := fmt.Sprintf("m=%s %d RTP/AVP %d\r\na=rtpmap:%d %s\r\n", kind, fw.port, pt, pt, rtpmap)
+	if c.SDPFmtpLine != "" {
+		line += fmt.Sprintf("a=fmtp:%d %s\r\n", pt, c.SDPFmtpLine)
+	}
+	return line
+}
+
+func (rec *recording) startFFmpeg() {
+	rec.run++
+	sdp := "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=fazol\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n" + mediaLine("video", rec.video)
+	if rec.audio != nil {
+		sdp += mediaLine("audio", rec.audio)
+	}
+	sdpPath := filepath.Join(rec.dir, fmt.Sprintf("run%04d.sdp", rec.run))
+	if err := os.WriteFile(sdpPath, []byte(sdp), 0o644); err != nil {
+		log.Printf("[%s] sdp: %v", rec.identity, err)
+		return
+	}
+
+	pattern := filepath.Join(rec.dir, fmt.Sprintf("r%04d-%%06d.mkv", rec.run))
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-protocol_whitelist", "file,udp,rtp",
+		"-reorder_queue_size", "4000",
+		"-i", sdpPath,
+		"-map", "0", "-c", "copy",
+		"-f", "segment",
+		"-segment_time", fmt.Sprint(segmentSeconds),
+		"-segment_format", "matroska",
+		"-reset_timestamps", "1",
+		pattern,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		log.Printf("[%s] ffmpeg: %v", rec.identity, err)
+		return
+	}
+	rec.cmd = cmd
+	log.Printf("[%s] gravando (%s%s)", rec.identity, rec.videoMime, map[bool]string{true: " + áudio", false: ""}[rec.audio != nil])
+
+	// Pede um quadro-chave assim que o ffmpeg estiver ouvindo
+	video := rec.video
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		video.rp.WritePLI(video.track.SSRC())
+	}()
+	go func() { _ = cmd.Wait() }()
+}
+
+func (rec *recording) stopFFmpeg() {
+	if rec.cmd == nil || rec.cmd.Process == nil {
+		return
+	}
+	cmd := rec.cmd
+	rec.cmd = nil
+	_ = cmd.Process.Signal(os.Interrupt) // finaliza o pedaço atual direitinho
+	go func() {
+		time.Sleep(3 * time.Second)
+		_ = cmd.Process.Kill()
+	}()
+}
+
+// Registra pedaços novos (com o horário em que apareceram) e apaga os velhos.
+func (rec *recording) scan() {
+	files, _ := filepath.Glob(filepath.Join(rec.dir, "*.mkv"))
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	now := time.Now()
+	for _, f := range files {
+		if !rec.seen[f] {
+			rec.seen[f] = true
+			rec.segments = append(rec.segments, segment{path: f, start: now})
+		}
+	}
+	kept := rec.segments[:0]
+	for _, s := range rec.segments {
+		if now.Sub(s.start) > keepBuffer {
+			_ = os.Remove(s.path)
+			delete(rec.seen, s.path)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	rec.segments = kept
+	sdps, _ := filepath.Glob(filepath.Join(rec.dir, "run*.sdp"))
+	for _, f := range sdps {
+		if info, err := os.Stat(f); err == nil && now.Sub(info.ModTime()) > keepBuffer && rec.cmd == nil {
+			_ = os.Remove(f)
+		}
+	}
+}
+
+func janitor() {
+	for range time.Tick(500 * time.Millisecond) {
+		mu.Lock()
+		list := make([]*recording, 0, len(records))
+		for _, r := range records {
+			list = append(list, r)
+		}
+		mu.Unlock()
+		for _, r := range list {
+			r.scan()
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Clipes
+// ---------------------------------------------------------------------------
+
+type clipRequest struct {
+	Identity string `json:"identity"`
+	Seconds  int    `json:"seconds"`
+	ID       string `json:"id"`
+}
+
+var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{6,32}$`)
+
+func makeClip(req clipRequest) (map[string]any, error) {
+	mu.Lock()
+	rec := records[req.Identity]
+	mu.Unlock()
+	if rec == nil {
+		return nil, fmt.Errorf("essa live não está sendo gravada")
+	}
+	rec.scan()
+
+	rec.mu.Lock()
+	segs := append([]segment(nil), rec.segments...)
+	mime := rec.videoMime
+	rec.mu.Unlock()
+	sort.Slice(segs, func(i, j int) bool { return segs[i].start.Before(segs[j].start) })
+	if len(segs) == 0 {
+		return nil, fmt.Errorf("ainda não há nada gravado dessa live")
+	}
+
+	// Começa no último pedaço que inicia antes de "agora - N" (sempre num quadro-chave)
+	target := time.Now().Add(-time.Duration(req.Seconds) * time.Second)
+	first := 0
+	for i, s := range segs {
+		if !s.start.After(target) {
+			first = i
+		}
+	}
+	chosen := segs[first:]
+
+	list := filepath.Join(os.TempDir(), req.ID+".txt")
+	var b strings.Builder
+	for _, s := range chosen {
+		if info, err := os.Stat(s.path); err == nil && info.Size() > 0 {
+			fmt.Fprintf(&b, "file '%s'\n", strings.ReplaceAll(s.path, "'", `'\''`))
+		}
+	}
+	if err := os.WriteFile(list, []byte(b.String()), 0o644); err != nil {
+		return nil, err
+	}
+	defer os.Remove(list)
+
+	ext, contentType := "webm", "video/webm"
+	if strings.Contains(mime, "h264") || strings.Contains(mime, "av1") {
+		ext, contentType = "mp4", "video/mp4"
+	}
+	file := req.ID + "." + ext
+	out := filepath.Join(clipsDir, file)
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+		"-f", "concat", "-safe", "0", "-i", list, "-map", "0", "-c", "copy"}
+	if ext == "mp4" {
+		args = append(args, "-movflags", "+faststart")
+	}
+	args = append(args, out)
+	cmd := exec.Command("ffmpeg", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("ffmpeg: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	info, err := os.Stat(out)
+	if err != nil || info.Size() == 0 {
+		return nil, fmt.Errorf("clipe vazio")
+	}
+	duration := time.Since(chosen[0].start).Seconds()
+	log.Printf("[%s] clipe %s: %d pedaços, ~%.0f s, %.1f MB", req.Identity, file, len(chosen), duration, float64(info.Size())/1e6)
+	return map[string]any{"file": file, "mime": contentType, "size": info.Size(), "duration": duration}, nil
+}
+
+func serveHTTP() {
+	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+	http.HandleFunc("/clip", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var req clipRequest
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&req) != nil || !safeID.MatchString(req.ID) || req.Seconds <= 0 || req.Seconds > 180 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "pedido inválido"})
+			return
+		}
+		res, err := makeClip(req)
+		if err != nil {
+			log.Printf("clipe falhou: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	})
+	log.Printf("API de clipes em %s", listenAddr)
+	log.Fatal(http.ListenAndServe(listenAddr, nil))
+}
+
+// ---------------------------------------------------------------------------
+// Sala
+// ---------------------------------------------------------------------------
+
+func isScreen(pub *lksdk.RemoteTrackPublication) bool {
+	s := pub.Source()
+	return s == livekit.TrackSource_SCREEN_SHARE || s == livekit.TrackSource_SCREEN_SHARE_AUDIO
+}
+
+func token() (string, error) {
+	grant := &auth.VideoGrant{RoomJoin: true, Room: roomName, Hidden: true}
+	grant.SetCanPublish(false)
+	grant.SetCanSubscribe(true)
+	return auth.NewAccessToken(apiKey, apiSecret).
+		SetVideoGrant(grant).
+		SetIdentity(identityRecorder).
+		SetName("Gravador de clipes").
+		SetValidFor(24 * time.Hour).
+		ToJWT()
+}
+
+func connect() {
+	disconnected := make(chan struct{}, 1)
+	callback := &lksdk.RoomCallback{
+		ParticipantCallback: lksdk.ParticipantCallback{
+			OnTrackPublished: func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				if isScreen(pub) {
+					_ = pub.SetSubscribed(true)
+				}
+			},
+			OnTrackSubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				if !isScreen(pub) {
+					return
+				}
+				if track.Kind() == webrtc.RTPCodecTypeVideo {
+					_ = pub.SetVideoQuality(livekit.VideoQuality_HIGH)
+				}
+				getRecording(rp.Identity()).addTrack(track, pub, rp)
+			},
+			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				getRecording(rp.Identity()).removeTrack(track)
+			},
+		},
+		OnDisconnected: func() {
+			select {
+			case disconnected <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	for {
+		tok, err := token()
+		if err != nil {
+			log.Fatalf("token: %v", err)
+		}
+		room, err := lksdk.ConnectToRoomWithToken(livekitURL, tok, callback, lksdk.WithAutoSubscribe(false))
+		if err != nil {
+			log.Printf("não consegui entrar na sala (%v), tentando de novo em 5 s", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		log.Printf("na sala %q, aguardando lives", roomName)
+
+		// Lives que já estavam no ar quando o gravador entrou
+		for _, rp := range room.GetRemoteParticipants() {
+			for _, p := range rp.TrackPublications() {
+				if pub, ok := p.(*lksdk.RemoteTrackPublication); ok && isScreen(pub) {
+					_ = pub.SetSubscribed(true)
+				}
+			}
+		}
+
+		<-disconnected
+		log.Printf("desconectado da sala, reconectando em 3 s")
+		time.Sleep(3 * time.Second)
+	}
+}
+
+func main() {
+	if apiKey == "" || apiSecret == "" {
+		log.Fatal("defina LIVEKIT_API_KEY e LIVEKIT_API_SECRET")
+	}
+	_ = os.MkdirAll(bufferDir, 0o755)
+	_ = os.MkdirAll(clipsDir, 0o755)
+	// Pedaços de execuções anteriores não servem mais
+	if entries, err := os.ReadDir(bufferDir); err == nil {
+		for _, e := range entries {
+			_ = os.RemoveAll(filepath.Join(bufferDir, e.Name()))
+		}
+	}
+	go janitor()
+	go serveHTTP()
+	connect()
+}

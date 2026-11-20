@@ -10,6 +10,9 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit
 COPY src ./src
 COPY public ./public
 
+# Pasta dos clipes (volume compartilhado com o gravador, mesmo UID 1000)
+RUN mkdir -p /data/clips && chown node:node /data/clips
+
 USER node
 EXPOSE 3000
 # start-interval: checa a cada 2s logo após iniciar, pro Traefik liberar o tráfego rápido

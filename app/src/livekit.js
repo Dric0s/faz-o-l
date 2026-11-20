@@ -44,9 +44,13 @@ function withLock(fn) {
   return run;
 }
 
+// O gravador de clipes entra na sala escondido: não conta como pessoa
+export const RECORDER_IDENTITY = 'fazol-recorder';
+
 async function listParticipants() {
   try {
-    return await roomService.listParticipants(config.room);
+    const all = await roomService.listParticipants(config.room);
+    return all.filter((p) => p.identity !== RECORDER_IDENTITY);
   } catch {
     return []; // sala ainda não existe
   }

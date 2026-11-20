@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-20.3';
+const SITE_VERSION = '2026-11-20.4';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -170,6 +170,7 @@ async function join() {
 
     show('view-room');
     renderPresence();
+    startClipsRefresh();
   } catch (err) {
     toast(err.message || 'Não foi possível entrar na sala.', true);
     state.room = null;
@@ -332,7 +333,25 @@ function ensureTile(id, name, isLocal = false) {
     layout();
   });
   el.querySelector('.ctl-full').addEventListener('click', () => toggleFullscreen(el));
-  el.addEventListener('dblclick', () => toggleFullscreen(el));
+  el.addEventListener('dblclick', (e) => {
+    if (!e.target.closest('.tile-controls')) toggleFullscreen(el);
+  });
+
+  // ✂ Clipar: os últimos 30 s / 1 min / 2 min desta live (gerado no servidor)
+  const clipMenu = el.querySelector('.clip-menu');
+  el.querySelector('.ctl-clip').addEventListener('click', (e) => {
+    e.stopPropagation();
+    clipMenu.hidden = !clipMenu.hidden;
+    el.classList.toggle('clip-open', !clipMenu.hidden);
+  });
+  clipMenu.addEventListener('click', (e) => {
+    const seconds = Number(e.target.closest('button')?.dataset.seconds);
+    if (!seconds) return;
+    clipMenu.hidden = true;
+    el.classList.remove('clip-open');
+    // Preview do navegador: a live é publicada com a identidade do próprio usuário
+    createClip(id === '__local__' ? state.me.id : id, seconds);
+  });
   el.addEventListener('touchstart', () => {
     el.classList.add('touch');
     clearTimeout(tile.touchTimer);
@@ -637,6 +656,142 @@ async function stopStream() {
     if (state.room) await api('/api/stream/stop', { method: 'POST' }).catch(() => {});
   }
   renderPresence();
+}
+
+// ---------------- clipes ----------------
+
+document.addEventListener('click', () => {
+  for (const menu of document.querySelectorAll('.clip-menu')) menu.hidden = true;
+  for (const tile of document.querySelectorAll('.tile.clip-open')) tile.classList.remove('clip-open');
+});
+
+let clipsTimer = null;
+
+async function createClip(streamer, seconds) {
+  toast(`✂ Gerando clipe dos últimos ${seconds >= 60 ? `${seconds / 60} min` : `${seconds} s`}…`);
+  try {
+    const clip = await api('/api/clips', { method: 'POST', body: { streamer, seconds } });
+    toast('Clipe pronto! Ele está na lista de Clipes.');
+    await loadClips();
+    return clip;
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function timeAgo(ms) {
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 60) return 'agora';
+  if (s < 3600) return `há ${Math.round(s / 60)} min`;
+  if (s < 86400) return `há ${Math.round(s / 3600)} h`;
+  return `há ${Math.round(s / 86400)} d`;
+}
+
+function timeLeft(expiresAt) {
+  const h = Math.max(0, (expiresAt - Date.now()) / 3600000);
+  return h >= 1 ? `some em ${Math.floor(h)} h` : `some em ${Math.max(1, Math.round(h * 60))} min`;
+}
+
+async function loadClips() {
+  if (!state.me) return;
+  try {
+    const { clips } = await api('/api/clips');
+    renderClips(clips);
+  } catch {
+    /* sem clipes por enquanto */
+  }
+}
+
+function renderClips(clips) {
+  $('#clips-count').textContent = clips.length ? `(${clips.length})` : '';
+  const list = $('#clips');
+  if (!clips.length) {
+    list.innerHTML = '<li class="empty-clips">Nenhum clipe ainda.</li>';
+    return;
+  }
+  list.replaceChildren(
+    ...clips.map((clip) => {
+      const li = document.createElement('li');
+      li.className = 'clip';
+
+      const video = document.createElement('video');
+      video.src = clip.url;
+      video.preload = 'metadata';
+      video.controls = true;
+      video.playsInline = true;
+
+      const meta = document.createElement('div');
+      meta.className = 'clip-meta';
+      const title = document.createElement('b');
+      title.textContent = clip.streamer;
+      const len = clip.seconds >= 60 ? `${clip.seconds / 60} min` : `${clip.seconds} s`;
+      const info = document.createElement('div');
+      info.className = 'muted';
+      info.textContent = `${len} • por ${clip.creator} • ${timeAgo(clip.createdAt)} • ${clip.saved ? 'salvo ⭐' : timeLeft(clip.expiresAt)}`;
+      meta.append(title, info);
+
+      const actions = document.createElement('div');
+      actions.className = 'clip-actions';
+      const link = `${location.origin}${clip.page}`;
+
+      const copy = document.createElement('button');
+      copy.textContent = '🔗 Copiar link';
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(link);
+          toast('Link copiado! Cole no Discord.');
+        } catch {
+          prompt('Copie o link do clipe:', link);
+        }
+      });
+
+      const download = document.createElement('a');
+      download.textContent = '⬇ Baixar';
+      download.href = clip.url;
+      download.download = `faz-o-l-${clip.streamer}-${clip.id}.${clip.mime.includes('mp4') ? 'mp4' : 'webm'}`;
+
+      actions.append(copy, download);
+
+      if (clip.mine) {
+        const save = document.createElement('button');
+        save.textContent = clip.saved ? '⭐ Salvo' : '☆ Salvar';
+        save.className = clip.saved ? 'saved' : '';
+        save.title = clip.saved ? 'Clique pra deixar expirar em 24 h' : 'Guardar pra sempre';
+        save.addEventListener('click', async () => {
+          try {
+            await api(`/api/clips/${clip.id}/save`, { method: 'POST', body: { saved: !clip.saved } });
+            loadClips();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        });
+
+        const del = document.createElement('button');
+        del.textContent = '🗑';
+        del.title = 'Excluir clipe';
+        del.className = 'danger';
+        del.addEventListener('click', async () => {
+          if (!confirm('Excluir este clipe? Não dá pra desfazer.')) return;
+          try {
+            await api(`/api/clips/${clip.id}`, { method: 'DELETE' });
+            loadClips();
+          } catch (err) {
+            toast(err.message, true);
+          }
+        });
+        actions.append(save, del);
+      }
+
+      li.append(video, meta, actions);
+      return li;
+    }),
+  );
+}
+
+function startClipsRefresh() {
+  loadClips();
+  clearInterval(clipsTimer);
+  clipsTimer = setInterval(loadClips, 30_000);
 }
 
 // ---------------- app desktop (Tauri) ----------------

@@ -104,6 +104,12 @@
         </div>
 
         <div class="panel">
+          <h3>Clipes <span id="clips-count" class="muted"></span></h3>
+          <p class="hint">Passe o mouse numa live e clique em <b>✂ Clipar</b>. Clipes não salvos somem em 24 h.</p>
+          <ul id="clips" class="clips"></ul>
+        </div>
+
+        <div class="panel">
           <h3>Na sala <span id="people-count" class="muted"></span></h3>
           <ul id="people" class="people"></ul>
         </div>
@@ -131,6 +137,14 @@
           <option value="low">Economia</option>
         </select>
         <span class="spacer"></span>
+        <div class="clip-wrap">
+          <button class="ctl ctl-clip" title="Clipar os últimos segundos">✂ Clipar</button>
+          <div class="clip-menu" hidden>
+            <button data-seconds="30">Últimos 30 s</button>
+            <button data-seconds="60">Último 1 min</button>
+            <button data-seconds="120">Últimos 2 min</button>
+          </div>
+        </div>
         <button class="ctl ctl-stop" title="Parar transmissão" hidden>■ Parar</button>
         <button class="ctl ctl-focus" title="Destacar">⤢</button>
         <button class="ctl ctl-full" title="Tela cheia">⛶</button>
