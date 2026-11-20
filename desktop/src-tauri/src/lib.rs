@@ -5,8 +5,14 @@
 //! nativos daqui: captura de tela pela GPU, áudio do sistema sem o som do próprio
 //! app e envio direto para o LiveKit.
 
+mod headless;
 mod server;
 mod stream;
+
+/// Modo de teste sem janela (`--test-stream`). Retorna o código de saída.
+pub fn run_test_stream(args: &[String]) -> i32 {
+    headless::run(args)
+}
 
 #[cfg(windows)]
 mod audio;

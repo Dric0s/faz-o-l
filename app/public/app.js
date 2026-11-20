@@ -676,8 +676,9 @@ async function setupDesktop() {
     <option value="720p30">720p • 30 fps (internet fraca)</option>`;
   $('#opt-quality').value = store.get('desktop-quality', '1080p60');
   $('#opt-quality').addEventListener('change', (e) => store.set('desktop-quality', e.target.value));
-  $('#opt-codec').value = store.get('desktop-codec', 'h264');
-  $('#opt-codec').addEventListener('change', (e) => store.set('desktop-codec', e.target.value));
+  // Medido no app: VP8 entrega ~55 fps em 1080p; o H.264 por software empaca em ~30
+  $('#opt-codec').value = store.get('desktop-codec-v2', 'vp8');
+  $('#opt-codec').addEventListener('change', (e) => store.set('desktop-codec-v2', e.target.value));
   $('#opt-preview').checked = selfPreviewEnabled();
   $('#opt-preview').addEventListener('change', (e) => {
     store.set('self-preview', e.target.checked ? '1' : '0');

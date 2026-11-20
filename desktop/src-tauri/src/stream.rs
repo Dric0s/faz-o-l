@@ -14,23 +14,25 @@ use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use serde::Deserialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub struct StartArgs {
-    url: String,
-    token: String,
-    monitor: usize,
-    width: u32,
-    height: u32,
-    fps: u32,
-    bitrate: u64,
-    codec: String,
-    audio: bool,
+    pub url: String,
+    pub token: String,
+    pub monitor: usize,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate: u64,
+    pub codec: String,
+    pub audio: bool,
 }
 
 pub struct Session {
-    room: Arc<Room>,
+    pub room: Arc<Room>,
+    pub video_track: LocalVideoTrack,
     stop: Arc<AtomicBool>,
     #[cfg(windows)]
     capture: Option<crate::capture::Control>,
@@ -48,12 +50,13 @@ fn codec_of(name: &str) -> (VideoCodec, &'static str) {
     match name {
         "av1" => (VideoCodec::AV1, "AV1"),
         "vp9" => (VideoCodec::VP9, "VP9"),
-        "vp8" => (VideoCodec::VP8, "VP8"),
-        _ => (VideoCodec::H264, "H.264"),
+        "h264" => (VideoCodec::H264, "H.264"),
+        // Padrão: VP8 (libvpx usa vários núcleos; o OpenH264 empaca em 1080p60)
+        _ => (VideoCodec::VP8, "VP8"),
     }
 }
 
-async fn teardown(session: Session) {
+pub async fn teardown(session: Session) {
     session.stop.store(true, Ordering::Relaxed);
     #[cfg(windows)]
     if let Some(control) = session.capture {
@@ -65,24 +68,9 @@ async fn teardown(session: Session) {
     let _ = session.room.close().await;
 }
 
-#[tauri::command]
-pub fn list_monitors() -> Result<serde_json::Value, String> {
-    #[cfg(windows)]
-    {
-        return crate::capture::monitors().map(|m| json!(m));
-    }
-    #[allow(unreachable_code)]
-    Err("Captura nativa disponível só no Windows por enquanto.".into())
-}
-
-#[tauri::command]
-pub async fn start_stream(app: AppHandle, state: State<'_, StreamState>, args: StartArgs) -> Result<(), String> {
-    let mut guard = state.0.lock().await;
-    if guard.is_some() {
-        return Err("Já existe uma transmissão em andamento.".into());
-    }
-
-    let (room, mut events) = Room::connect(&args.url, &args.token, RoomOptions::default())
+/// Conecta, publica tela (+ áudio) e inicia a captura. Usado pelo app e pelo modo de teste.
+pub async fn open_session(args: &StartArgs) -> Result<(Session, UnboundedReceiver<RoomEvent>, String), String> {
+    let (room, events) = Room::connect(&args.url, &args.token, RoomOptions::default())
         .await
         .map_err(|e| format!("Não consegui conectar no servidor de vídeo: {e}"))?;
     let room = Arc::new(room);
@@ -95,7 +83,7 @@ pub async fn start_stream(app: AppHandle, state: State<'_, StreamState>, args: S
     let publish = room
         .local_participant()
         .publish_track(
-            LocalTrack::Video(video_track),
+            LocalTrack::Video(video_track.clone()),
             TrackPublishOptions {
                 source: TrackSource::Screenshare,
                 video_codec: codec,
@@ -160,16 +148,40 @@ pub async fn start_stream(app: AppHandle, state: State<'_, StreamState>, args: S
         }
     }
 
-    *guard = Some(Session {
-        room: room.clone(),
-        stop: stop.clone(),
+    let label = format!("{codec_name} • {}x{} {} fps", args.width, args.height, args.fps);
+    let session = Session {
+        room,
+        video_track,
+        stop,
         #[cfg(windows)]
         capture,
         audio_thread,
-    });
+    };
+    Ok((session, events, label))
+}
+
+#[tauri::command]
+pub fn list_monitors() -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        return crate::capture::monitors().map(|m| json!(m));
+    }
+    #[allow(unreachable_code)]
+    Err("Captura nativa disponível só no Windows por enquanto.".into())
+}
+
+#[tauri::command]
+pub async fn start_stream(app: AppHandle, state: State<'_, StreamState>, args: StartArgs) -> Result<(), String> {
+    let mut guard = state.0.lock().await;
+    if guard.is_some() {
+        return Err("Já existe uma transmissão em andamento.".into());
+    }
+
+    let (session, mut events, label) = open_session(&args).await?;
+    *guard = Some(session);
     drop(guard);
 
-    emit_state(&app, "live", None, Some(format!("{codec_name} • {}x{} {} fps", args.width, args.height, args.fps)));
+    emit_state(&app, "live", None, Some(label));
 
     // Se o servidor derrubar a conexão (ex.: vaga revogada), encerra tudo
     let app_events = app.clone();
