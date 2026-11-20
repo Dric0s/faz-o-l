@@ -78,7 +78,10 @@ async function setPermission(room, identity, permission) {
 // O app desktop transmite como um participante separado: "<id do usuário>:tela"
 const DESKTOP_SUFFIX = ':tela';
 const isDesktop = (identity) => identity.endsWith(DESKTOP_SUFFIX);
-export const ownerOf = (identity) => (isDesktop(identity) ? identity.slice(0, -DESKTOP_SUFFIX.length) : identity);
+// A página dentro do app desktop entra como "<id>:app" (assim a mesma pessoa pode
+// transmitir pelo app e assistir no navegador ao mesmo tempo)
+const APP_SUFFIX = ':app';
+export const ownerOf = (identity) => identity.replace(/:(tela|app)$/, '');
 
 // Nome de quem pegou token (o webhook do LiveKit às vezes chega sem o nome)
 const knownNames = new Map(); // id do usuário -> nome
@@ -180,6 +183,7 @@ channelHooks.onMemberRemoved = (channel, userId) => {
   const room = roomName(channel);
   removeParticipant(room, userId);
   removeParticipant(room, `${userId}${DESKTOP_SUFFIX}`);
+  removeParticipant(room, `${userId}${APP_SUFFIX}`);
 };
 
 export function livekitRouter() {
@@ -240,11 +244,12 @@ export function livekitRouter() {
   });
 
   // Token para entrar na sala (todo mundo entra como espectador)
-  router.post('/api/c/:cid/token', ...member, async (req, res) => {
+  router.post('/api/c/:cid/token', ...member, express.json(), async (req, res) => {
     const user = req.user;
+    const identity = req.body?.client === 'desktop' ? `${user.id}${APP_SUFFIX}` : user.id;
     const room = roomName(req.channel);
     const participants = await listParticipants(room);
-    const others = participants.filter((p) => p.identity !== user.id);
+    const others = participants.filter((p) => p.identity !== identity);
     const capacity = config.maxViewers + config.maxStreamers;
     if (others.length >= capacity) {
       return res.status(409).json({ error: `Sala cheia (${capacity} pessoas). Tente daqui a pouco.` });
@@ -259,7 +264,7 @@ export function livekitRouter() {
 
     rememberName(user.id, user.name);
     const at = new AccessToken(apiKey, apiSecret, {
-      identity: user.id,
+      identity,
       name: user.name,
       metadata: JSON.stringify({ avatar: user.avatar || '', username: user.username || '' }),
       ttl: '12h',
@@ -286,6 +291,9 @@ export function livekitRouter() {
         const me = participants.find((p) => p.identity === identity);
         if (!me) return { status: 409, error: 'Entre na sala antes de transmitir.' };
         if (me.permission?.canPublish) return { status: 200 };
+        if (streamerIdentities(room, participants).has(`${identity}${DESKTOP_SUFFIX}`)) {
+          return { status: 409, error: 'Você já está transmitindo pelo app desktop.' };
+        }
 
         const full = slotsFull(room, participants);
         if (full) return full;

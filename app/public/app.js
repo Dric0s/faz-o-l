@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-21.2';
+const SITE_VERSION = '2026-11-21.3';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -343,7 +343,9 @@ async function join() {
   btn.disabled = true;
   btn.textContent = 'Entrando…';
   try {
-    const { token, url } = await api(ch('/token'), { method: 'POST' });
+    // Dentro do app desktop a página entra como "<id>:app": dá pra estar ao mesmo
+    // tempo no app (transmitindo) e no navegador (assistindo) sem um derrubar o outro
+    const { token, url } = await api(ch('/token'), { method: 'POST', body: { client: desktop ? 'desktop' : 'web' } });
 
     const room = new Room({
       adaptiveStream: false, // a qualidade é escolhida pelo espectador
@@ -419,9 +421,11 @@ document.addEventListener('click', () => {
 });
 
 function onTrackSubscribed(track, publication, participant) {
-  // A própria transmissão feita pelo app desktop: o áudio nunca volta (eco);
-  // o vídeo aparece como prévia, se a opção estiver ligada
-  if (state.me && participant.identity === state.me.id + DESKTOP_SUFFIX) {
+  // A própria transmissão feita pelo app desktop, vista DENTRO do app: o áudio nunca
+  // volta (eco); o vídeo aparece como prévia, se a opção estiver ligada.
+  // No navegador ela aparece como uma live normal (o som começa mudo, ver abaixo).
+  const ownAppStream = state.me && participant.identity === state.me.id + DESKTOP_SUFFIX;
+  if (ownAppStream && desktop) {
     if (track.kind !== Track.Kind.Video || !selfPreviewEnabled()) {
       publication.setSubscribed(false);
       return;
@@ -435,15 +439,22 @@ function onTrackSubscribed(track, publication, participant) {
     renderPresence();
     return;
   }
+  const tileName = ownAppStream ? `${participant.name || 'Você'} (você, pelo app)` : participant.name || participant.identity;
   if (track.source === Track.Source.ScreenShare && track.kind === Track.Kind.Video) {
-    const tile = ensureTile(participant.identity, participant.name || participant.identity);
+    const tile = ensureTile(participant.identity, tileName);
     tile.publication = publication;
     track.attach(tile.video);
     tile.el.classList.add('has-video');
     applyQuality(tile);
     updateResolution(tile, track);
   } else if (track.source === Track.Source.ScreenShareAudio && track.kind === Track.Kind.Audio) {
-    const tile = ensureTile(participant.identity, participant.name || participant.identity);
+    const tile = ensureTile(participant.identity, tileName);
+    // Som da própria live começa mudo: no mesmo PC, o app capturaria esse som de volta (eco)
+    if (ownAppStream && !tile.ownAudioWarned) {
+      tile.ownAudioWarned = true;
+      tile.muted = true;
+      toast('O som da sua live começa mudo (no mesmo PC daria eco). Clique em 🔇 pra ouvir.');
+    }
     tile.audioTrack = track;
     const el = track.attach();
     $('#audio-sink').append(el);
@@ -604,18 +615,30 @@ function toggleFullscreen(el) {
 
 // ---------------- presença / contadores ----------------
 
-// O app desktop transmite como um participante separado "<id>:tela".
-// Na lista de pessoas ele aparece como o próprio dono (marcado AO VIVO).
+// Uma pessoa pode estar na sala com mais de um participante:
+//   "<id>"      navegador
+//   "<id>:app"  a página dentro do app desktop
+//   "<id>:tela" a transmissão nativa do app desktop
+// Na lista ela aparece uma vez só (marcada AO VIVO se qualquer um transmite).
 const DESKTOP_SUFFIX = ':tela';
-const isDesktopId = (identity) => identity.endsWith(DESKTOP_SUFFIX);
-const ownerOf = (identity) => (isDesktopId(identity) ? identity.slice(0, -DESKTOP_SUFFIX.length) : identity);
+const ownerOf = (identity) => identity.replace(/:(tela|app)$/, '');
+
+function allParticipants() {
+  if (!state.room) return [];
+  return [state.room.localParticipant, ...state.room.remoteParticipants.values()];
+}
 
 function participants() {
-  if (!state.room) return [];
-  const all = [state.room.localParticipant, ...state.room.remoteParticipants.values()];
-  const present = new Set(all.map((p) => p.identity));
-  // Esconde o "<id>:tela" quando o dono também está na sala
-  return all.filter((p) => !isDesktopId(p.identity) || !present.has(ownerOf(p.identity)));
+  const byOwner = new Map();
+  for (const p of allParticipants()) {
+    const owner = ownerOf(p.identity);
+    const current = byOwner.get(owner);
+    // Prefere: eu mesmo > quem não é a transmissão nativa
+    if (!current || p === state.room.localParticipant || (current.identity.endsWith(DESKTOP_SUFFIX) && current !== state.room.localParticipant)) {
+      byOwner.set(owner, p);
+    }
+  }
+  return [...byOwner.values()];
 }
 
 function hasScreen(p) {
@@ -624,9 +647,16 @@ function hasScreen(p) {
   return false;
 }
 
+/** Minha transmissão pelo app desktop (participante "<eu>:tela"), se estiver no ar. */
+function myAppStream() {
+  const p = state.me && state.room?.remoteParticipants.get(state.me.id + DESKTOP_SUFFIX);
+  return p && hasScreen(p) ? p : null;
+}
+
 function isStreaming(p) {
-  if (p === state.room?.localParticipant) return !!state.local;
-  return hasScreen(p) || hasScreen(state.room?.remoteParticipants.get(p.identity + DESKTOP_SUFFIX));
+  const owner = ownerOf(p.identity);
+  if (owner === state.me?.id && state.local) return true;
+  return allParticipants().some((x) => x !== state.room.localParticipant && ownerOf(x.identity) === owner && hasScreen(x));
 }
 
 function renderPresence() {
@@ -648,6 +678,12 @@ function renderPresence() {
     btn.classList.add('streaming');
     btn.disabled = false;
     $('#slots').textContent = 'Você está ao vivo 🔴';
+  } else if (myAppStream()) {
+    // Transmitindo pelo app desktop e assistindo aqui no navegador
+    btn.textContent = 'Transmitindo pelo app';
+    btn.classList.add('streaming');
+    btn.disabled = true;
+    $('#slots').textContent = 'Você está ao vivo pelo app 🔴 (pare por lá)';
   } else {
     btn.textContent = 'Transmitir minha tela';
     btn.classList.remove('streaming');
