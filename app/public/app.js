@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-20.2';
+const SITE_VERSION = '2026-11-20.3';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -668,6 +668,12 @@ const DESKTOP_QUALITY = {
 
 async function setupDesktop() {
   if (!desktop) return;
+  try {
+    const version = await desktop.core.invoke('app_version');
+    $('#build').textContent = `site ${SITE_VERSION} • app ${version}`;
+  } catch {
+    $('#build').textContent = `site ${SITE_VERSION} • app antigo (baixe a versão nova)`;
+  }
   document.body.classList.add('is-desktop');
   $('#desktop-opts').hidden = false;
   $('#browser-audio-hint').hidden = true;

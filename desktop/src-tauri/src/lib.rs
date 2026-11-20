@@ -25,6 +25,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(stream::StreamState::default())
         .invoke_handler(tauri::generate_handler![
+            server::app_version,
             server::get_server,
             server::set_server,
             stream::list_monitors,

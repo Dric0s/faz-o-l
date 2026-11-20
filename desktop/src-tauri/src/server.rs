@@ -47,6 +47,7 @@ fn allow_remote(app: &AppHandle, origin: &Url) {
         .permission("core:event:default")
         .permission("allow-list-monitors")
         .permission("allow-gpu-encoder")
+        .permission("allow-app-version")
         .permission("allow-start-stream")
         .permission("allow-stop-stream");
     if let Err(err) = app.add_capability(capability) {
@@ -64,11 +65,17 @@ pub fn open_main_window(app: &AppHandle) -> tauri::Result<()> {
     };
 
     WebviewWindowBuilder::new(app, "main", target)
-        .title("Faz o L")
+        .title(format!("Faz o L {}", env!("CARGO_PKG_VERSION")))
         .inner_size(1280.0, 800.0)
         .min_inner_size(800.0, 560.0)
         .build()?;
     Ok(())
+}
+
+/// Versão do app (mostrada no painel do site, junto com a versão do site)
+#[tauri::command]
+pub fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 #[tauri::command]
