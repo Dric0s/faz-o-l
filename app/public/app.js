@@ -17,6 +17,9 @@ const QUALITY = {
   '720p30': { width: 1280, height: 720, fps: 30, bitrate: 2_500_000, layer: [854, 480, 800_000, 30] },
 };
 
+// Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
+const SITE_VERSION = '2026-11-20.2';
+
 const $ = (sel) => document.querySelector(sel);
 const state = {
   me: null,
@@ -751,5 +754,6 @@ async function startNativeStream() {
   }
 }
 
+$('#build').textContent = `site ${SITE_VERSION}${desktop ? ' • app desktop' : ''}`;
 init().catch((err) => toast(err.message, true));
 setupDesktop();
