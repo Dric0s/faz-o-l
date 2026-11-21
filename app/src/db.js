@@ -84,6 +84,7 @@ CREATE INDEX IF NOT EXISTS clip_mentions_user ON clip_mentions(user_id);
 // Migrações de colunas novas (ignora se já existir)
 for (const stmt of [
   "ALTER TABLE clips ADD COLUMN discord_message TEXT", // "<canal>:<mensagem>" do post no Discord
+  "ALTER TABLE clips ADD COLUMN saved_by TEXT", // quem salvou (qualquer membro do canal pode salvar)
 ]) {
   try {
     db.exec(stmt);

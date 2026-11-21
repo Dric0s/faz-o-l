@@ -85,9 +85,35 @@ function publicClip(clip, user, channel = null) {
     createdAt: clip.created_at,
     saved: !!clip.saved,
     expiresAt: clip.saved ? null : clip.created_at + UNSAVED_TTL_MS,
+    savedBy: clip.saved && clip.saved_by ? nameOf(clip.saved_by) : null,
     mine: !!user && clip.creator_id === user.id,
+    canSave: !!user && !!ch && !!memberRole(ch.id, user.id),
+    canUnsave: !!user && canUnsave(clip, user.id),
     canDelete: !!user && (clip.creator_id === user.id || owner),
   };
+}
+
+function nameOf(userId) {
+  return sql('SELECT name FROM users WHERE id = ?').get(userId)?.name || null;
+}
+
+/** Tirar dos salvos: quem salvou, quem clipou ou o dono do canal. */
+function canUnsave(clip, userId) {
+  return clip.saved_by === userId || clip.creator_id === userId
+    || memberRole(clip.channel_id, userId) === 'owner';
+}
+
+/** Salvar: qualquer membro do canal. Desfazer: ver canUnsave. Devolve a mensagem de erro, se houver. */
+function setSaved(clip, userId, saved) {
+  if (!memberRole(clip.channel_id, userId)) return 'Só quem participa do canal pode salvar.';
+  if (saved) {
+    if (!clip.saved) sql('UPDATE clips SET saved = 1, saved_by = ? WHERE id = ?').run(userId, clip.id);
+    return null;
+  }
+  if (!clip.saved) return null;
+  if (!canUnsave(clip, userId)) return 'Só quem salvou, quem clipou ou o dono do canal pode tirar dos salvos.';
+  sql('UPDATE clips SET saved = 0, saved_by = NULL WHERE id = ?').run(clip.id);
+  return null;
 }
 
 async function removeClip(clip) {
@@ -215,10 +241,14 @@ export async function clipsRouter() {
   router.patch('/api/clips/:id', requireUser, express.json(), (req, res) => {
     const clip = getClip(req.params.id);
     if (!clip) return res.status(404).json({ error: 'Clipe não encontrado (talvez já tenha expirado).' });
-    if (clip.creator_id !== req.user.id) return res.status(403).json({ error: 'Só quem clipou pode editar.' });
     const body = req.body || {};
+    const editing = 'title' in body || 'description' in body || body.publish;
+    if (editing && clip.creator_id !== req.user.id) return res.status(403).json({ error: 'Só quem clipou pode editar.' });
+    if ('saved' in body) {
+      const error = setSaved(clip, req.user.id, !!body.saved);
+      if (error) return res.status(403).json({ error });
+    }
     if ('title' in body || 'description' in body) setDetails(clip, body);
-    if ('saved' in body) sql('UPDATE clips SET saved = ? WHERE id = ?').run(body.saved ? 1 : 0, clip.id);
     if (body.publish) publish(clip.id);
     res.json(publicClip(getClip(clip.id), req.user));
   });
@@ -227,8 +257,8 @@ export async function clipsRouter() {
   router.post('/api/clips/:id/save', requireUser, express.json(), (req, res) => {
     const clip = getClip(req.params.id);
     if (!clip) return res.status(404).json({ error: 'Clipe não encontrado (talvez já tenha expirado).' });
-    if (clip.creator_id !== req.user.id) return res.status(403).json({ error: 'Só quem criou pode salvar.' });
-    sql('UPDATE clips SET saved = ? WHERE id = ?').run(req.body?.saved === false ? 0 : 1, clip.id);
+    const error = setSaved(clip, req.user.id, req.body?.saved !== false);
+    if (error) return res.status(403).json({ error });
     res.json(publicClip(getClip(clip.id), req.user));
   });
 

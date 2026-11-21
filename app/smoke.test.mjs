@@ -82,6 +82,15 @@ await call(friend, 'PATCH', '/api/clips/clip1', { description: 'olha isso @Amigo
 assert.equal((await updated).clip.description, 'olha isso @amigo.legal. e @estranho!');
 await call(friend, 'PATCH', '/api/clips/clip1', { description: 'olha isso @amigo.legal. e @estranho' });
 
+// Salvar: qualquer membro do canal; quem não é do canal não
+assert.equal((await call(stranger, 'PATCH', '/api/clips/clip1', { saved: true })).status, 403);
+const savedByOwner = (await call(owner, 'PATCH', '/api/clips/clip1', { saved: true })).json;
+assert.equal(savedByOwner.saved, true);
+assert.equal(savedByOwner.savedBy, owner.name);
+// Quem clipou também pode tirar dos salvos; membro qualquer, só se foi ele que salvou
+assert.equal((await call(friend, 'PATCH', '/api/clips/clip1', { saved: false })).json.saved, false);
+assert.equal((await call(friend, 'PATCH', '/api/clips/clip1', { saved: true })).json.canUnsave, true);
+
 // Perfis
 const ownerProfile = (await call(friend, 'GET', '/api/users/dono')).json;
 assert.equal(ownerProfile.streamed.length, 1);

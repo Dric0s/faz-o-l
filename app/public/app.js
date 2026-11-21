@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-22.5';
+const SITE_VERSION = '2026-11-22.6';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -1226,11 +1226,17 @@ function clipDetails(clip, { onChange, showChannel = false }) {
     edit.textContent = '✏ Editar';
     edit.title = 'Título, descrição e marcações';
     edit.addEventListener('click', () => openEditDialog(clip, onChange));
-
+    actions.append(edit);
+  }
+  // Salvar: qualquer pessoa do canal. Tirar dos salvos: quem salvou, quem clipou ou o dono.
+  if (clip.canSave ?? clip.mine) {
     const save = document.createElement('button');
+    const savedBy = clip.savedBy ? `Salvo por ${clip.savedBy}` : 'Salvo';
     save.textContent = clip.saved ? '⭐ Salvo' : '☆ Salvar';
     save.className = clip.saved ? 'saved' : '';
-    save.title = clip.saved ? 'Clique pra deixar expirar em 24 h' : 'Guardar pra sempre';
+    save.disabled = clip.saved && clip.canUnsave === false;
+    save.title = !clip.saved ? 'Guardar pra sempre (senão expira em 24 h)'
+      : save.disabled ? savedBy : `${savedBy}. Clique pra deixar expirar em 24 h`;
     save.addEventListener('click', async () => {
       try {
         await api(`/api/clips/${clip.id}`, { method: 'PATCH', body: { saved: !clip.saved } });
@@ -1239,7 +1245,7 @@ function clipDetails(clip, { onChange, showChannel = false }) {
         toast(err.message, true);
       }
     });
-    actions.append(edit, save);
+    actions.append(save);
   }
   if (clip.canDelete) {
     const del = document.createElement('button');
