@@ -12,6 +12,7 @@ fn main() {
             "gpu_encoder",
             "start_stream",
             "stop_stream",
+            "set_mini_mode",
         ]),
     ))
     .expect("falha ao rodar tauri-build");

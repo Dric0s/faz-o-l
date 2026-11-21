@@ -7,6 +7,7 @@
 
 mod headless;
 mod hotkeys;
+mod mini;
 mod server;
 mod stream;
 mod updater;
@@ -29,6 +30,7 @@ pub fn run() {
         .plugin(hotkeys::plugin())
         .manage(stream::StreamState::default())
         .manage(updater::UpdateState::default())
+        .manage(mini::MiniState::default())
         .invoke_handler(tauri::generate_handler![
             server::app_version,
             updater::update_status,
@@ -39,6 +41,7 @@ pub fn run() {
             stream::gpu_encoder,
             stream::start_stream,
             stream::stop_stream,
+            mini::set_mini_mode,
         ])
         .setup(|app| {
             server::open_main_window(app.handle())?;

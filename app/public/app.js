@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-22.3';
+const SITE_VERSION = '2026-11-22.4';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -401,6 +401,7 @@ async function leave() {
   if (!state.room) return;
   state.leaving = true;
   exitPip();
+  if (state.mini) await setMiniMode(null);
   await stopStream();
   await state.room.disconnect();
   state.room = null;
@@ -568,8 +569,13 @@ function ensureTile(id, name, isLocal = false) {
   });
   el.querySelector('.ctl-full').addEventListener('click', () => toggleFullscreen(el));
   const pip = el.querySelector('.ctl-pip');
-  pip.hidden = !pipSupported(tile.video);
+  pip.hidden = !desktop && !pipSupported(tile.video);
   pip.addEventListener('click', () => togglePip(tile));
+  // No modo mini do app: arrastar a live move a janela, duplo clique volta ao normal
+  el.addEventListener('mousedown', (e) => {
+    if (state.mini !== id || e.button !== 0 || e.target.closest('button, input, select, .clip-menu')) return;
+    desktop.window.getCurrentWindow().startDragging().catch(() => {});
+  });
   el.querySelector('.pip-back').addEventListener('click', (e) => {
     e.stopPropagation();
     exitPip();
@@ -580,7 +586,9 @@ function ensureTile(id, name, isLocal = false) {
     setPipState(tile, tile.video.webkitPresentationMode === 'picture-in-picture');
   });
   el.addEventListener('dblclick', (e) => {
-    if (!e.target.closest('.tile-controls')) toggleFullscreen(el);
+    if (e.target.closest('.tile-controls')) return;
+    if (state.mini === id) setMiniMode(null);
+    else toggleFullscreen(el);
   });
 
   // ✂ Clipar: os últimos 30 s / 1 min / 3 min desta live (gerado no servidor)
@@ -614,6 +622,7 @@ function removeTile(id) {
   const tile = state.tiles.get(id);
   if (!tile) return;
   if (pipElement() === tile.video) exitPip();
+  if (state.mini === id) setMiniMode(null);
   tile.el.remove();
   state.tiles.delete(id);
   if (state.focus === id) state.focus = null;
@@ -681,14 +690,42 @@ function pipElement() {
 }
 
 async function togglePip(tile) {
+  if (state.mini === tile.id) return setMiniMode(null);
   if (pipElement() === tile.video) return exitPip();
+  // App desktop: o WebView2 não tem picture-in-picture, o próprio app vira a janela flutuante
+  if (desktop && await setMiniMode(tile.id)) return;
   try {
     if (tile.video.requestPictureInPicture) await tile.video.requestPictureInPicture();
     else tile.video.webkitSetPresentationMode('picture-in-picture');
   } catch (err) {
     console.warn('[pip]', err);
-    toast('Não deu para abrir a janela flutuante. A live já carregou?', true);
+    toast(desktop
+      ? 'Atualize o app Faz o L para usar a janela flutuante.'
+      : 'Não deu para abrir a janela flutuante. A live já carregou?', true);
   }
+}
+
+/** Modo mini do app desktop: id do tile que vira a janela flutuante, ou null para voltar. */
+async function setMiniMode(id) {
+  const prev = state.mini ? state.tiles.get(state.mini) : null;
+  try {
+    await desktop.core.invoke('set_mini_mode', { on: Boolean(id) });
+  } catch (err) {
+    console.warn('[mini]', err); // app antigo, sem o comando
+    if (id) return false;
+  }
+  if (prev) {
+    prev.el.classList.remove('mini-target');
+    prev.el.querySelector('.ctl-pip').classList.remove('active');
+  }
+  state.mini = id || null;
+  document.body.classList.toggle('mini-mode', Boolean(id));
+  const tile = id && state.tiles.get(id);
+  if (tile) {
+    tile.el.classList.add('mini-target');
+    tile.el.querySelector('.ctl-pip').classList.add('active');
+  }
+  return true;
 }
 
 function exitPip() {
@@ -1986,3 +2023,7 @@ async function startNativeStream() {
 $('#build').textContent = `site ${SITE_VERSION}${desktop ? ' • app desktop' : ''}`;
 route().catch((err) => toast(err.message, true));
 setupDesktop();
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.mini) setMiniMode(null);
+});

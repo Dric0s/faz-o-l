@@ -505,3 +505,20 @@ textarea { resize: vertical; }
   background: var(--accent); color: var(--accent-ink); font: inherit; font-size: 13px;
 }
 .tile-pip-note .pip-back:hover { background: var(--accent-2); }
+
+/* app desktop: modo mini (a janela do app vira a janela flutuante com uma live só) */
+body.mini-mode .hud-top, body.mini-mode .rail, body.mini-mode .dock,
+body.mini-mode .drawer { display: none !important; }
+body.mini-mode .stage {
+  position: fixed !important; inset: 0 !important; z-index: 50; padding: 0 !important;
+  display: block !important; background: #000;
+}
+body.mini-mode .tile:not(.mini-target), body.mini-mode .empty { display: none !important; }
+body.mini-mode .tile.mini-target {
+  position: absolute; inset: 0; width: 100%; height: 100%; aspect-ratio: auto !important;
+  border-radius: 0; box-shadow: none; cursor: grab;
+}
+body.mini-mode .tile.mini-target :is(.ctl-volume, .ctl-quality, .clip-wrap, .ctl-focus, .ctl-full, .ctl-stop, .tile-res) { display: none !important; }
+body.mini-mode .tile-top { top: 8px; left: 8px; right: 8px; }
+body.mini-mode .tile-controls { left: 8px; right: auto; bottom: 8px; }
+body.mini-mode .tile-unmute { top: 40px; }
