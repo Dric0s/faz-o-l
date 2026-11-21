@@ -295,7 +295,8 @@ textarea { resize: vertical; }
   padding: 0 12px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
 }
 .ctl:hover { background: #ffffff2b; }
-.ctl-mute, .ctl-focus, .ctl-full { padding: 0; width: 34px; }
+.ctl-mute, .ctl-focus, .ctl-full, .ctl-pip { padding: 0; width: 34px; }
+.ctl-pip.active { background: var(--accent); color: var(--accent-ink); }
 .ctl-clip { background: var(--accent); color: var(--accent-ink); }
 .ctl-clip:hover { background: var(--accent-2); }
 .ctl-stop { background: var(--red); }
@@ -492,3 +493,15 @@ textarea { resize: vertical; }
   animation: in .25s ease-out;
 }
 .tile-unmute:hover { background: var(--accent-2); }
+
+/* picture-in-picture: a live está na janela flutuante */
+.tile-pip-note {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background: #0d0e0bd9; color: var(--text, #f2f2ea); font-weight: 700; font-size: 14px;
+}
+.tile-pip-note .pip-back {
+  height: 36px; padding: 0 16px; border: 0; border-radius: 999px; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink); font: inherit; font-size: 13px;
+}
+.tile-pip-note .pip-back:hover { background: var(--accent-2); }

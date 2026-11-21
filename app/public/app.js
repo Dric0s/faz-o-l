@@ -18,7 +18,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-22.2';
+const SITE_VERSION = '2026-11-22.3';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -400,6 +400,7 @@ async function join() {
 async function leave() {
   if (!state.room) return;
   state.leaving = true;
+  exitPip();
   await stopStream();
   await state.room.disconnect();
   state.room = null;
@@ -566,6 +567,18 @@ function ensureTile(id, name, isLocal = false) {
     layout();
   });
   el.querySelector('.ctl-full').addEventListener('click', () => toggleFullscreen(el));
+  const pip = el.querySelector('.ctl-pip');
+  pip.hidden = !pipSupported(tile.video);
+  pip.addEventListener('click', () => togglePip(tile));
+  el.querySelector('.pip-back').addEventListener('click', (e) => {
+    e.stopPropagation();
+    exitPip();
+  });
+  tile.video.addEventListener('enterpictureinpicture', () => setPipState(tile, true));
+  tile.video.addEventListener('leavepictureinpicture', () => setPipState(tile, false));
+  tile.video.addEventListener('webkitpresentationmodechanged', () => {
+    setPipState(tile, tile.video.webkitPresentationMode === 'picture-in-picture');
+  });
   el.addEventListener('dblclick', (e) => {
     if (!e.target.closest('.tile-controls')) toggleFullscreen(el);
   });
@@ -600,6 +613,7 @@ function ensureTile(id, name, isLocal = false) {
 function removeTile(id) {
   const tile = state.tiles.get(id);
   if (!tile) return;
+  if (pipElement() === tile.video) exitPip();
   tile.el.remove();
   state.tiles.delete(id);
   if (state.focus === id) state.focus = null;
@@ -647,6 +661,57 @@ function toggleFullscreen(el) {
   if (document.fullscreenElement) document.exitFullscreen();
   else el.requestFullscreen?.().catch(() => {});
 }
+
+// ---------------- picture-in-picture ----------------
+// A live sai numa janela flutuante por cima de tudo (jogo, outras abas).
+// O áudio continua tocando pela página, com o volume escolhido no tile.
+
+function pipSupported(video) {
+  if (document.pictureInPictureEnabled && !video.disablePictureInPicture) return true;
+  return typeof video.webkitSupportsPresentationMode === 'function'
+    && video.webkitSupportsPresentationMode('picture-in-picture');
+}
+
+function pipElement() {
+  if (document.pictureInPictureElement) return document.pictureInPictureElement;
+  for (const tile of state.tiles.values()) {
+    if (tile.video.webkitPresentationMode === 'picture-in-picture') return tile.video;
+  }
+  return null;
+}
+
+async function togglePip(tile) {
+  if (pipElement() === tile.video) return exitPip();
+  try {
+    if (tile.video.requestPictureInPicture) await tile.video.requestPictureInPicture();
+    else tile.video.webkitSetPresentationMode('picture-in-picture');
+  } catch (err) {
+    console.warn('[pip]', err);
+    toast('Não deu para abrir a janela flutuante. A live já carregou?', true);
+  }
+}
+
+function exitPip() {
+  if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
+  for (const tile of state.tiles.values()) {
+    if (tile.video.webkitPresentationMode === 'picture-in-picture') tile.video.webkitSetPresentationMode('inline');
+  }
+}
+
+function setPipState(tile, on) {
+  tile.el.classList.toggle('in-pip', on);
+  tile.el.querySelector('.tile-pip-note').hidden = !on;
+  tile.el.querySelector('.ctl-pip').classList.toggle('active', on);
+}
+
+// Chrome: abre a janela flutuante sozinho ao trocar de aba, se o navegador permitir
+try {
+  navigator.mediaSession?.setActionHandler('enterpictureinpicture', () => {
+    const tile = (state.focus && state.tiles.get(state.focus))
+      || [...state.tiles.values()].find((t) => !t.isLocal);
+    if (tile) togglePip(tile);
+  });
+} catch { /* navegador não suporta */ }
 
 // ---------------- presença / contadores ----------------
 
