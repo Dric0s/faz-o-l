@@ -49,7 +49,14 @@ pub fn spawn(app: AppHandle) {
 
 async fn run(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     set(app, "checking", None, None);
-    let Some(update) = app.updater()?.check().await? else {
+    // Sem o padrão do plugin (que fecha as janelas antes de abrir o instalador): se o
+    // Windows barrar o instalador (Smart App Control, antivírus), o app continua aberto
+    // em vez de ficar rodando escondido. Se o instalador abrir, o processo sai sozinho.
+    let updater = app
+        .updater_builder()
+        .on_before_exit(|| log::info!("abrindo o instalador da atualização"))
+        .build()?;
+    let Some(update) = updater.check().await? else {
         set(app, "none", None, None);
         return Ok(());
     };
@@ -66,7 +73,13 @@ async fn run(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     set(app, "installing", Some(&version), None);
     // No Windows o instalador assume daqui: fecha o app, instala e reabre
-    update.install(bytes)?;
+    if let Err(err) = update.install(bytes) {
+        log::warn!("instalador não abriu: {err}");
+        return Err(format!(
+            "O Windows não deixou instalar a versão {version}. Baixe e instale pelo GitHub."
+        )
+        .into());
+    }
     app.restart();
 }
 
