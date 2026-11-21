@@ -1,11 +1,3 @@
-  const channelMatch = path.match(/^/c/([w-]+)/);
-  const inviteMatch = path.match(/^/convite/([w-]+)/);
-  const profileMatch = path.match(/^/u/([^/]+)/);
-
-  // Saiu da página do canal: sai da sala. Ver um perfil não conta: a sala (e a sua
-  // transmissão) continua rodando por trás, e o "Voltar" traz de volta.
-  const leavingRoom = !profileMatch && (!channelMatch || channelMatch[1] !== state.channel?.id);
-  if (state.room && leavingRoom) await leave();
 import {
   AudioPresets,
   DisconnectReason,
