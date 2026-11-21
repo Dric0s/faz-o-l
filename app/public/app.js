@@ -1,3 +1,11 @@
+  const channelMatch = path.match(/^/c/([w-]+)/);
+  const inviteMatch = path.match(/^/convite/([w-]+)/);
+  const profileMatch = path.match(/^/u/([^/]+)/);
+
+  // Saiu da página do canal: sai da sala. Ver um perfil não conta: a sala (e a sua
+  // transmissão) continua rodando por trás, e o "Voltar" traz de volta.
+  const leavingRoom = !profileMatch && (!channelMatch || channelMatch[1] !== state.channel?.id);
+  if (state.room && leavingRoom) await leave();
 import {
   AudioPresets,
   DisconnectReason,
@@ -18,7 +26,7 @@ const QUALITY = {
 };
 
 // Versão do site (aparece no painel; ajuda a saber se o app pegou o código novo)
-const SITE_VERSION = '2026-11-22.4';
+const SITE_VERSION = '2026-11-22.5';
 
 const $ = (sel) => document.querySelector(sel);
 const state = {
@@ -127,12 +135,14 @@ async function route() {
   }
   if (!state.me) return showLogin(params.get('erro'), path);
 
-  // Saiu da página do canal: sai da sala
   const channelMatch = path.match(/^\/c\/([\w-]+)/);
-  if (state.room && (!channelMatch || channelMatch[1] !== state.channel?.id)) await leave();
-
   const inviteMatch = path.match(/^\/convite\/([\w-]+)/);
   const profileMatch = path.match(/^\/u\/([^/]+)/);
+
+  // Saiu da página do canal: sai da sala. Ver um perfil não conta: a sala (e a sua
+  // transmissão) continua rodando por trás, e o "Voltar" traz de volta.
+  const leavingRoom = !profileMatch && (!channelMatch || channelMatch[1] !== state.channel?.id);
+  if (state.room && leavingRoom) await leave();
   if (inviteMatch) return showInvite(inviteMatch[1]);
   if (profileMatch) return showProfile(decodeURIComponent(profileMatch[1]));
   if (channelMatch) {
@@ -279,7 +289,10 @@ async function showInvite(code) {
 // ---------------- canal ----------------
 
 async function showChannel(id) {
-  if (state.room && state.channel?.id === id) return show('view-room');
+  if (state.room && state.channel?.id === id) {
+    document.title = `${state.channel.name} • Faz o L`;
+    return show('view-room');
+  }
   try {
     state.channel = await api(`/api/c/${id}`);
   } catch (err) {
@@ -438,8 +451,10 @@ function wireRoom(room) {
         ? 'Você entrou em outra aba/dispositivo.'
         : 'Você foi desconectado da sala.';
       toast(msg, true);
-      show('view-join');
-      refreshJoinStatus();
+      if (!$('#view-room').hidden) {
+        show('view-join');
+        refreshJoinStatus();
+      }
     });
 }
 
@@ -1576,6 +1591,8 @@ let profileTab = 'streamed';
 async function showProfile(username) {
   show('view-profile');
   $('#profile-back').href = state.channel ? `/c/${state.channel.id}` : '/';
+  $('#profile-back').textContent = !state.room ? '← Voltar'
+    : state.local || myAppStream() ? '← Voltar pra sala (você está ao vivo)' : '← Voltar pra sala';
   $('#profile-name').textContent = 'Carregando…';
   $('#profile-username').textContent = `@${username}`;
   $('#profile-channels').textContent = '';
